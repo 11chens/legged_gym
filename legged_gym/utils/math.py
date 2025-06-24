@@ -54,3 +54,27 @@ def torch_rand_sqrt_float(lower, upper, shape, device):
     r = torch.where(r<0., -torch.sqrt(-r), torch.sqrt(r))
     r =  (r + 1.) / 2.
     return (upper - lower) * r + lower
+
+# @ torch.jit.script
+def yaw_quat(quat: torch.Tensor) -> torch.Tensor:
+    quat_yaw = quat.clone().view(-1, 4)
+    qx = quat_yaw[:, 0]
+    qy = quat_yaw[:, 1]
+    qz = quat_yaw[:, 2]
+    qw = quat_yaw[:, 3]
+    yaw = torch.atan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz))
+    quat_yaw[:, :2] = 0.0
+    quat_yaw[:, 2] = torch.sin(yaw / 2)
+    quat_yaw[:, 3] = torch.cos(yaw / 2)
+    quat_yaw = normalize(quat_yaw)
+    return quat_yaw
+
+def cart2polar(self, pos_xy):
+    """ convert cartesian coordinates to polar coordinates
+    """
+    pos_polar = pos_xy.clone()
+    rho = torch.sqrt(pos_xy[:,0]**2 + pos_xy[:,1]**2)
+    theta = torch.atan2(pos_xy[:,1], pos_xy[:,0])
+    pos_polar[:, 0] = theta
+    pos_polar[:, 1] = rho
+    return pos_polar 
