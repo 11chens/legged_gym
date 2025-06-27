@@ -68,8 +68,9 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
     class commands:
         curriculum = False
         max_curriculum = 1.
-        num_commands = 3
+        num_commands = 2
         dis_update = 0.35
+        resampling_time = 5
         class ranges:
             use_polar = False
             # if use polar: it is rho and theta, else x and y
@@ -140,10 +141,10 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
 
     class normalization:
         class obs_scales:
-            lin_vel = 1.0
-            ang_vel = 1.0
+            lin_vel = 2.0
+            ang_vel = 0.25
             dof_pos = 1.0
-            dof_vel = 0.2
+            dof_vel = 0.05
             height_measurements = 2.0
             ray2d = 1.0
         clip_observations = 100.

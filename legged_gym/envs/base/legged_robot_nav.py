@@ -61,15 +61,17 @@ class LeggedRobotNav(LeggedRobot):
         """
         super()._init_buffers()
         
-        self.position_targets = torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device, requires_grad=False)
-        self.nav_commands = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device, requires_grad=False)
+        self.position_targets = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device, requires_grad=False)
+        self.nav_commands = torch.zeros(self.num_envs, self.cfg.commands.num_commands, dtype=torch.float, device=self.device, requires_grad=False)
+        # nav_commands_buffer: simulate transmission delay
+        self.nav_commands_buffer = torch.zeros(self.num_envs, 10, self.cfg.commands.num_commands, dtype=torch.float, device=self.device, requires_grad=False)
         self.nav_actions = torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device, requires_grad=False)
         self.sigma = 0.5 
     
     
     def reset_idx(self, env_ids):
         """ origin: update terrain_cur(env_origin), cmd_curr, dofs, root_state(pos, vel), resample_cmds, fill extras
-            now: remove cmd_curr, and some useless vars, update only when time out
+            new: remove cmd_curr, and some useless vars, update only when time out
         """
         
         if len(env_ids) == 0:
@@ -114,7 +116,7 @@ class LeggedRobotNav(LeggedRobot):
         self.commands[:, :3] = nav_actions # vx, vy, vyaw, pitch
         loco_obs_buf = self.compute_loco_observations()
         prop = loco_obs_buf
-        ang_vel = self.base_ang_vel[:, 2:] * 0.25
+        ang_vel = self.base_ang_vel[:, 2:] * self.obs_scales.ang_vel
         lin_vel_pred = self.slr_encoder_vel(self.slr_obs_hist.view(self.num_envs, -1))
         actor_obs = torch.cat(
             (lin_vel_pred, prop, ang_vel), dim=-1)
@@ -125,18 +127,13 @@ class LeggedRobotNav(LeggedRobot):
     def compute_loco_observations(self):
         """ It is only used for computing loco actions, NOT for updating rl agent.
         """
-        scale_lin_vel = 2.0
-        scale_ang_vel = 0.25
-        scale_dof_pos = 1.0
-        scale_dof_vel = 0.05
-        self.commands_scale = torch.tensor([scale_lin_vel, scale_lin_vel, scale_ang_vel], device=self.device, requires_grad=False,) 
         # TODO: add pitch degree to self.commands
         loco_obs_buf =torch.cat((
-                self.base_ang_vel * scale_ang_vel, # 3
+                self.base_ang_vel * self.obs_scales.ang_vel, # 3
                 self.projected_gravity, # 3
                 self.commands[:, :3] * self.commands_scale,
-                self.reindex((self.dof_pos - self.default_dof_pos) * scale_dof_pos),
-                self.reindex(self.dof_vel * scale_dof_vel),
+                self.reindex((self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos),
+                self.reindex(self.dof_vel * self.obs_scales.dof_vel),
                 self.unreindex_actions),dim=-1)
         
         return loco_obs_buf
@@ -148,7 +145,7 @@ class LeggedRobotNav(LeggedRobot):
 
     def step(self, actions):
         """ origin: loco policy (dim12) -> act2tq
-            now: nav policy (dim 3): loco_cmds -> act (dim 12)
+            new: nav policy (dim 3): loco_cmds -> act (dim 12)
         """
         # compute_actions: loco_cmds -> loco_actions
         self.nav_actions = torch.clip(actions, -3.0, 3.0).to(self.device)
@@ -209,33 +206,44 @@ class LeggedRobotNav(LeggedRobot):
 
     def _post_physics_step_callback(self):
         """ origin: resample_cmds[env_ids] at resampling_time
-            now: update nav_commands every step
+            new: update nav_commands every step
         """
+        env_ids = (self.episode_length_buf % int(self.cfg.commands.resampling_time / self.dt)==0).nonzero(as_tuple=False).flatten()
+        self._resample_commands(env_ids, on_the_way=True)
         # pos in world -> pos in robot
         pos_diff = self.position_targets - self.root_states[:, 0:3]
         goal_xy_base = quat_rotate_inverse(yaw_quat(self.base_quat[:]), pos_diff)[:, :2] 
         self.nav_commands[:, :2] = cart2polar(goal_xy_base) # rho, theta
 
 
-    def _resample_commands(self, env_ids):
+    def _resample_commands(self, env_ids, on_the_way=False):
         """ Only resample in reset (time out)
         """
         while len(env_ids) > 0:
-            _target_pos1 = torch_rand_float(-5.0, 5.0, (len(env_ids), 1), device=self.device)
-            _target_pos2 = torch_rand_float(-5.0, 5.0, (len(env_ids), 1), device=self.device)
-            self.position_targets[env_ids, 0:1] = self.env_origins[env_ids, 0:1] + _target_pos1
-            self.position_targets[env_ids, 1:2] = self.env_origins[env_ids, 1:2] + _target_pos2
+            if on_the_way:
+                sim_move_pos = torch_rand_float(-1.0, 1.0, (len(env_ids), 2), device=self.device)
+                self.position_targets[env_ids] += sim_move_pos
+            else:
+                _target_pos1 = torch_rand_float(-5.0, 5.0, (len(env_ids), 1), device=self.device)
+                _target_pos2 = torch_rand_float(-5.0, 5.0, (len(env_ids), 1), device=self.device)
+                self.position_targets[env_ids, 0:1] = self.env_origins[env_ids, 0:1] + _target_pos1
+                self.position_targets[env_ids, 1:2] = self.env_origins[env_ids, 1:2] + _target_pos2
         
+
 
     def compute_observations(self):
         """ Computes observations for updating nav agent
         """
+        sample_idx = torch.randint(0, self.nav_commands_buffer.shape[1]-1)
+        nav_cmds_delay = self.nav_commands_buffer[:, -sample_idx, :]
+
         self.obs_buf = torch.cat((  self.base_lin_vel * self.obs_scales.lin_vel,
                                     self.base_ang_vel  * self.obs_scales.ang_vel,
                                     self.projected_gravity,
-                                    self.nav_commands, # goal_position[rho, theta]
+                                    nav_cmds_delay, # goal_position (rho, theta)
                                     self.nav_actions # last nav_action 
                                     ),dim=-1)
+
 
     def _draw_debug_vis(self):
         """ Draw position targets
