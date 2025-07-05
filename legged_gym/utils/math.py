@@ -69,7 +69,7 @@ def yaw_quat(quat: torch.Tensor) -> torch.Tensor:
     quat_yaw = normalize(quat_yaw)
     return quat_yaw
 
-def cart2polar(self, pos_xy):
+def cart2polar(pos_xy):
     """ convert cartesian coordinates to polar coordinates
     """
     pos_polar = pos_xy.clone()

@@ -33,7 +33,7 @@ from legged_gym.envs.base.legged_robot_nav_config import LeggedRobotNavCfg
 
 class Go2NavFlatCfg( LeggedRobotNavCfg ):
     class env(LeggedRobotNavCfg.env):
-        num_observations = 61
+        num_observations = 23
         num_envs = 1280
         episode_length_s = 20 # episode length in seconds  # will be randomized in [s-minus, s]
         no_nav = True
@@ -90,10 +90,10 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
         decimation = 4
 
     class asset( LeggedRobotNavCfg.asset ):
-        file = '{LEGGED_GYM_ROOT_DIR}/resources/go2_description/urdf/go2_description.urdf'
+        file = '{LEGGED_GYM_ROOT_DIR}/resources/robots/go2_description/urdf/go2_description.urdf'
         flip_visual_attachments = True
         fix_base_link = False
-        name = "go1"
+        name = "go2"
         foot_name = "foot"
         penalize_contacts_on = ["thigh", "calf", "Head_upper", "Head_lower", "base"] # collision reward
         terminate_after_contacts_on = ["base", "Head_upper", "Head_lower"] # termination rewrad
@@ -166,12 +166,12 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
     class rewards():
         class scales():
             nomove = -0.0 # -200.0 
-            stuck = -3.0 # -0.5 
+            stuck = -0.0 # -2.0
             reach_target = 50.0 # 50.0 
             stand_still_pos = 0.0  # -0.1
             lin_vel_z = -10.0 # -3.0 
             ang_vel_xy = -0.5 
-            cmds_track = -0.2 
+            cmds_track = 0.0 # -0.2 
             cmds_rate = -0.00 # -0.5 
             action_rate = -0.01 # -0.005 
 
@@ -194,7 +194,7 @@ class Go2NavFlatCfgPPO( LeggedRobotCfgPPO ):
         
     class runner( LeggedRobotCfgPPO.runner ):
         run_name = ''
-        experiment_name = 'go1_pos_rough'
+        experiment_name = 'go2_nav_flat'
         
         policy_class_name = 'ActorCritic'
         algorithm_class_name = 'PPO'

@@ -56,18 +56,72 @@ class LeggedRobotNav(LeggedRobot):
 
     def _init_buffers(self):
         """ inherit loco vars: self.commands[vx, vy, vyaw, pitch], self.actons[joint_pos]
-            add nav vars: self.nav_commands[rho, theta], self.nav_actions[vx, vy, vyaw]
+            add nav vars: self.nav_commands[theta, rho], self.nav_actions[vx, vy, vyaw]
             update vars: self.obs_buf -> nav_polciy
         """
         super()._init_buffers()
         
-        self.position_targets = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device, requires_grad=False)
+        self.position_targets = torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device, requires_grad=False) # (x, y, z), align quat_rotate_inverse
         self.nav_commands = torch.zeros(self.num_envs, self.cfg.commands.num_commands, dtype=torch.float, device=self.device, requires_grad=False)
         # nav_commands_buffer: simulate transmission delay
         self.nav_commands_buffer = torch.zeros(self.num_envs, 10, self.cfg.commands.num_commands, dtype=torch.float, device=self.device, requires_grad=False)
         self.nav_actions = torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device, requires_grad=False)
-        self.sigma = 0.5 
+        self.last_dof_actions = torch.zeros(self.num_envs, 12, dtype=torch.float, device=self.device, requires_grad=False)
+        self.slr_obs_buf = torch.zeros(
+                self.num_envs, 45, device=self.device, dtype=torch.float)
+        self.slr_obs_hist = torch.zeros(
+                self.num_envs, 10, 45, device=self.device, dtype=torch.float)  
+        self.sigma = 0.5
+
+        self._load_loco_policy()
+
+    def _load_loco_policy(self):
+        """ load loco policy, which is used to compute loco actions from nav actions
+            the loco policy is a slr policy, which is trained with proprioception
+        """
+        
+        self.slr_body = torch.jit.load('locomotion_model/np3o/body_latest.jit')
+        self.slr_encoder_vel = torch.jit.load('locomotion_model/np3o/encoder_vel.jit')
+        
+        self.slr_body =  self.slr_body.to(self.device)
+        self.slr_encoder_vel =  self.slr_encoder_vel.to(self.device)
+
+    def _compute_actions(self, nav_actions):
+        """ nav_actions (loco_cmds) -> loco_actions (self.commands)
+            a hacky implementation
+        """
+        self.commands = nav_actions # vx, vy, vyaw, pitch
+        props = self._compute_loco_observations()
+        ang_vel = self.base_ang_vel[:, 2:] * self.obs_scales.ang_vel
+        lin_vel_pred = self.slr_encoder_vel(self.slr_obs_hist.view(self.num_envs, -1))
+        actor_obs = torch.cat(
+            (lin_vel_pred, props, ang_vel), dim=-1)
+        loco_actions = self.slr_body(actor_obs)
+            
+        return loco_actions
     
+    def _compute_loco_observations(self):
+        """ It is only used for computing loco actions, NOT for updating rl agent.
+        """
+        # TODO: add pitch degree to self.commands
+        props = torch.cat((
+                self.base_ang_vel * self.obs_scales.ang_vel, # 3
+                self.projected_gravity, # 3
+                self.commands[:, :3] * self.commands_scale,
+                self.reindex((self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos),
+                self.reindex(self.dof_vel * self.obs_scales.dof_vel),
+                self.last_dof_actions),dim=-1)
+        
+        self.slr_obs_hist = torch.where(
+            (self.episode_length_buf <= 1)[:, None, None],
+            torch.stack([props] * self.slr_obs_hist.shape[1], dim=1),
+            torch.cat([
+                self.slr_obs_hist[:, 1:],
+                props.unsqueeze(1)
+            ], dim=1)
+        )  
+
+        return props
     
     def reset_idx(self, env_ids):
         """ origin: update terrain_cur(env_origin), cmd_curr, dofs, root_state(pos, vel), resample_cmds, fill extras
@@ -76,12 +130,20 @@ class LeggedRobotNav(LeggedRobot):
         
         if len(env_ids) == 0:
             return
-        self._update_terrain_curriculum(env_ids)
+        # self._update_terrain_curriculum(env_ids)
         
         # reset robot states
         self._reset_dofs(env_ids)
         self._reset_root_states(env_ids) # root_state = env_origin, init_state
         self._resample_commands(env_ids)
+
+        self.last_actions[env_ids] = 0.
+        self.last_dof_vel[env_ids] = 0.
+        self.last_root_vel[env_ids] = 0.
+        self.episode_length_buf[env_ids] = 0
+        self.slr_obs_hist[env_ids, :, :] = 0.
+        self.nav_commands_buffer[env_ids, :, :] = 0.
+
         # fill extras
         self.extras["episode"] = {}
         for key in self.episode_sums.keys():
@@ -108,35 +170,6 @@ class LeggedRobotNav(LeggedRobot):
                                                    torch.clip(self.terrain_levels[env_ids], 0)) # (the minumum level is zero)
         self.env_origins[env_ids] = self.terrain_origins[self.terrain_levels[env_ids], self.terrain_types[env_ids]]
     
-        
-    def compute_actions(self, nav_actions):
-        """ nav_actions (loco_cmds) -> loco_actions (self.commands)
-            a hacky implementation
-        """
-        self.commands[:, :3] = nav_actions # vx, vy, vyaw, pitch
-        loco_obs_buf = self.compute_loco_observations()
-        prop = loco_obs_buf
-        ang_vel = self.base_ang_vel[:, 2:] * self.obs_scales.ang_vel
-        lin_vel_pred = self.slr_encoder_vel(self.slr_obs_hist.view(self.num_envs, -1))
-        actor_obs = torch.cat(
-            (lin_vel_pred, prop, ang_vel), dim=-1)
-        loco_actions = self.slr_body(actor_obs)
-            
-        return loco_actions
-    
-    def compute_loco_observations(self):
-        """ It is only used for computing loco actions, NOT for updating rl agent.
-        """
-        # TODO: add pitch degree to self.commands
-        loco_obs_buf =torch.cat((
-                self.base_ang_vel * self.obs_scales.ang_vel, # 3
-                self.projected_gravity, # 3
-                self.commands[:, :3] * self.commands_scale,
-                self.reindex((self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos),
-                self.reindex(self.dof_vel * self.obs_scales.dof_vel),
-                self.unreindex_actions),dim=-1)
-        
-        return loco_obs_buf
     
     def reindex(self,tensor):
         """ sim2real purpose
@@ -147,10 +180,10 @@ class LeggedRobotNav(LeggedRobot):
         """ origin: loco policy (dim12) -> act2tq
             new: nav policy (dim 3): loco_cmds -> act (dim 12)
         """
-        # compute_actions: loco_cmds -> loco_actions
+        # _compute_actions: loco_cmds -> loco_actions
         self.nav_actions = torch.clip(actions, -3.0, 3.0).to(self.device)
-        actions = self.compute_actions(self.nav_actions)
-        self.unreindex_actions = actions
+        actions = self._compute_actions(self.nav_actions)
+        self.last_dof_actions = actions
         actions = self.reindex(actions)
         
         clip_actions = self.cfg.normalization.clip_actions
@@ -213,37 +246,43 @@ class LeggedRobotNav(LeggedRobot):
         # pos in world -> pos in robot
         pos_diff = self.position_targets - self.root_states[:, 0:3]
         goal_xy_base = quat_rotate_inverse(yaw_quat(self.base_quat[:]), pos_diff)[:, :2] 
-        self.nav_commands[:, :2] = cart2polar(goal_xy_base) # rho, theta
+        self.nav_commands = cart2polar(goal_xy_base) # theta, rho
 
 
     def _resample_commands(self, env_ids, on_the_way=False):
         """ Only resample in reset (time out)
         """
-        while len(env_ids) > 0:
+        if len(env_ids) > 0:
             if on_the_way:
                 sim_move_pos = torch_rand_float(-1.0, 1.0, (len(env_ids), 2), device=self.device)
-                self.position_targets[env_ids] += sim_move_pos
+                self.position_targets[env_ids, :2] += sim_move_pos
             else:
                 _target_pos1 = torch_rand_float(-5.0, 5.0, (len(env_ids), 1), device=self.device)
                 _target_pos2 = torch_rand_float(-5.0, 5.0, (len(env_ids), 1), device=self.device)
                 self.position_targets[env_ids, 0:1] = self.env_origins[env_ids, 0:1] + _target_pos1
                 self.position_targets[env_ids, 1:2] = self.env_origins[env_ids, 1:2] + _target_pos2
-        
-
 
     def compute_observations(self):
         """ Computes observations for updating nav agent
         """
-        sample_idx = torch.randint(0, self.nav_commands_buffer.shape[1]-1)
-        nav_cmds_delay = self.nav_commands_buffer[:, -sample_idx, :]
+        sample_idx = torch.randint(0, self.nav_commands_buffer.shape[1]-1, (self.num_envs,), device=self.device)
+        nav_cmds_delay = self.nav_commands_buffer[torch.arange(self.num_envs, device=self.device), -sample_idx, :]
 
         self.obs_buf = torch.cat((  self.base_lin_vel * self.obs_scales.lin_vel,
                                     self.base_ang_vel  * self.obs_scales.ang_vel,
                                     self.projected_gravity,
-                                    nav_cmds_delay, # goal_position (rho, theta)
+                                    nav_cmds_delay, # goal_position (theta, rho)
                                     self.nav_actions # last nav_action 
                                     ),dim=-1)
-
+        
+        self.nav_commands_buffer = torch.where(
+            (self.episode_length_buf <= 1)[:, None, None],
+            torch.stack([self.nav_commands] * self.nav_commands_buffer.shape[1], dim=1),
+            torch.cat([
+                self.nav_commands_buffer[:, 1:],
+                self.nav_commands.unsqueeze(1)
+            ], dim=1)
+        )  
 
     def _draw_debug_vis(self):
         """ Draw position targets

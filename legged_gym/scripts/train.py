@@ -36,6 +36,23 @@ import isaacgym
 from legged_gym.envs import *
 from legged_gym.utils import get_args, task_registry
 import torch
+import sys
+import argparse
+
+parser = argparse.ArgumentParser(description="Run the R8 robot in ROS2 environment.")
+parser.add_argument("--debug", action="store_true", help="Enable debug mode.")
+args = parser.parse_args()
+
+if args.debug:
+    import debugpy
+
+    ip_address = ("0.0.0.0", 6789)
+    print(f"Process: {sys.argv[:]}")
+    print(f"Is waiting for attach at {ip_address[0]}:{ip_address[1]}", flush=True)
+    debugpy.listen(ip_address)
+    debugpy.wait_for_client()
+    debugpy.breakpoint()
+
 
 def train(args):
     env, env_cfg = task_registry.make_env(name=args.task, args=args)
@@ -43,5 +60,5 @@ def train(args):
     ppo_runner.learn(num_learning_iterations=train_cfg.runner.max_iterations, init_at_random_ep_len=True)
 
 if __name__ == '__main__':
-    args = get_args()
+    args = get_args(args.debug)
     train(args)
