@@ -49,7 +49,7 @@ Thumbs.db
 *.wmv
 
 # VS Code
-.vscode
+# .vscode
 # logs
 logs
 runs
