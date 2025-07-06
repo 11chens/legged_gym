@@ -77,4 +77,5 @@ def cart2polar(pos_xy):
     theta = torch.atan2(pos_xy[:,1], pos_xy[:,0])
     pos_polar[:, 0] = theta
     pos_polar[:, 1] = rho
+    pos_polar[:, 0] = wrap_to_pi(pos_polar[:, 0])  # wrap theta to [-pi, pi]
     return pos_polar 

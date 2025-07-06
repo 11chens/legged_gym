@@ -46,14 +46,17 @@ from legged_gym.envs.base.base_task import BaseTask
 from legged_gym.utils.terrain import Terrain
 from legged_gym.utils.math import quat_apply_yaw, wrap_to_pi, torch_rand_sqrt_float, yaw_quat, cart2polar
 from legged_gym.utils.helpers import class_to_dict
-from .legged_robot_config import LeggedRobotCfg
+from legged_gym.envs.go2.go2_nav_config import Go2NavFlatCfg
 from .legged_robot import LeggedRobot
 
 class LeggedRobotNav(LeggedRobot):
-    # cfg : LeggedRobotNavCfg
+    cfg : Go2NavFlatCfg
     def __init__(self, cfg, sim_params, physics_engine, sim_device, headless):
         super().__init__(cfg, sim_params, physics_engine, sim_device, headless)
 
+        self.debug_viz = self.cfg.debug_viz
+        self.sigma = 0.5
+        
     def _init_buffers(self):
         """ inherit loco vars: self.commands[vx, vy, vyaw, pitch], self.actons[joint_pos]
             add nav vars: self.nav_commands[theta, rho], self.nav_actions[vx, vy, vyaw]
@@ -71,7 +74,6 @@ class LeggedRobotNav(LeggedRobot):
                 self.num_envs, 45, device=self.device, dtype=torch.float)
         self.slr_obs_hist = torch.zeros(
                 self.num_envs, 10, 45, device=self.device, dtype=torch.float)  
-        self.sigma = 0.5
 
         self._load_loco_policy()
 
@@ -80,8 +82,8 @@ class LeggedRobotNav(LeggedRobot):
             the loco policy is a slr policy, which is trained with proprioception
         """
         
-        self.slr_body = torch.jit.load('locomotion_model/np3o/body_latest.jit')
-        self.slr_encoder_vel = torch.jit.load('locomotion_model/np3o/encoder_vel.jit')
+        self.slr_body = torch.jit.load('controller/np3o/body_latest.jit')
+        self.slr_encoder_vel = torch.jit.load('controller/np3o/encoder_vel.jit')
         
         self.slr_body =  self.slr_body.to(self.device)
         self.slr_encoder_vel =  self.slr_encoder_vel.to(self.device)
@@ -245,15 +247,24 @@ class LeggedRobotNav(LeggedRobot):
         self._resample_commands(env_ids, on_the_way=True)
         # pos in world -> pos in robot
         pos_diff = self.position_targets - self.root_states[:, 0:3]
-        goal_xy_base = quat_rotate_inverse(yaw_quat(self.base_quat[:]), pos_diff)[:, :2] 
-        self.nav_commands = cart2polar(goal_xy_base) # theta, rho
+        self.goal_xy_base = quat_rotate_inverse(yaw_quat(self.base_quat[:]), pos_diff)[:, :2] 
+        self.nav_commands = cart2polar(self.goal_xy_base) # theta, rho
 
+        self.nav_commands_buffer = torch.where(
+            (self.episode_length_buf <= 1)[:, None, None],
+            torch.stack([self.nav_commands] * self.nav_commands_buffer.shape[1], dim=1),
+            torch.cat([
+                self.nav_commands_buffer[:, 1:],
+                self.nav_commands.unsqueeze(1)
+            ], dim=1)
+        )  
 
     def _resample_commands(self, env_ids, on_the_way=False):
         """ Only resample in reset (time out)
         """
         if len(env_ids) > 0:
             if on_the_way:
+                # simulate a tracking jitter
                 sim_move_pos = torch_rand_float(-1.0, 1.0, (len(env_ids), 2), device=self.device)
                 self.position_targets[env_ids, :2] += sim_move_pos
             else:
@@ -265,8 +276,7 @@ class LeggedRobotNav(LeggedRobot):
     def compute_observations(self):
         """ Computes observations for updating nav agent
         """
-        sample_idx = torch.randint(0, self.nav_commands_buffer.shape[1]-1, (self.num_envs,), device=self.device)
-        nav_cmds_delay = self.nav_commands_buffer[torch.arange(self.num_envs, device=self.device), -sample_idx, :]
+        nav_cmds_delay = self.nav_commands_buffer[:, -int(self.cfg.commands.delay_time / self.dt), :]
 
         self.obs_buf = torch.cat((  self.base_lin_vel * self.obs_scales.lin_vel,
                                     self.base_ang_vel  * self.obs_scales.ang_vel,
@@ -275,15 +285,6 @@ class LeggedRobotNav(LeggedRobot):
                                     self.nav_actions # last nav_action 
                                     ),dim=-1)
         
-        self.nav_commands_buffer = torch.where(
-            (self.episode_length_buf <= 1)[:, None, None],
-            torch.stack([self.nav_commands] * self.nav_commands_buffer.shape[1], dim=1),
-            torch.cat([
-                self.nav_commands_buffer[:, 1:],
-                self.nav_commands.unsqueeze(1)
-            ], dim=1)
-        )  
-
     def _draw_debug_vis(self):
         """ Draw position targets
         """
@@ -297,18 +298,17 @@ class LeggedRobotNav(LeggedRobot):
             gymutil.draw_lines(sphere_blue, self.gym, self.viewer, self.envs[i], sphere_pose) 
 
 
-
     #### rewards
-    # nomove = -0.0 # -200.0 
-    # stuck = -3.0 # -0.5 
-    # reach_pos_target_tight = 50.0 # 50.0 
-    # stand_still_pos = 0.0  # -0.1 
-    # cmds_track = -0.2  
-    # cmds_rate = -0.00 # -0.5 
-    # action_rate = -0.01 # -0.005 
-    
+
     def _reward_reach_target(self):
         distance = torch.norm(self.position_targets[:, :2] - self.root_states[:, :2], dim=1)
         self.reach_goal = distance < self.sigma
-        return (1. /(1. + 10*torch.square(distance))) * (distance < self.sigma)
+        return (1. /(1. + 10*torch.square(distance))) * self.reach_goal.float()
+        # return torch.exp(-distance/self.cfg.rewards.tracking_sigma) * self.reach_goal.float()
     
+    def _reward_stand_still(self):
+        # Penalize motion at zero commands
+        distance = torch.norm(self.position_targets[:, :2] - self.root_states[:, :2], dim=1)
+        ang_vel = torch.abs(self.base_ang_vel[:, 2]) 
+        lin_vel = torch.abs(self.base_lin_vel[:, 0]) + torch.abs(self.base_lin_vel[:, 1])
+        return (lin_vel + ang_vel) * (distance < 0.2)     

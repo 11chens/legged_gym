@@ -130,6 +130,9 @@ def update_cfg_from_args(env_cfg, cfg_train, args):
         # num envs
         if args.num_envs is not None:
             env_cfg.env.num_envs = args.num_envs
+        # debug
+        if args.debug:
+            env_cfg.debug_viz = args.debug
     if cfg_train is not None:
         if args.seed is not None:
             cfg_train.seed = args.seed
@@ -149,7 +152,7 @@ def update_cfg_from_args(env_cfg, cfg_train, args):
 
     return env_cfg, cfg_train
 
-def get_args(debug=False):
+def get_args(custom_args=None):
     custom_parameters = [
         {"name": "--task", "type": str, "default": "go2_nav", "help": "Resume training or start testing from a checkpoint. Overrides config file if provided."},
         {"name": "--resume", "action": "store_true", "default": False,  "help": "Resume training from a checkpoint"},
@@ -166,19 +169,28 @@ def get_args(debug=False):
         {"name": "--seed", "type": int, "help": "Random seed. Overrides config file if provided."},
         {"name": "--max_iterations", "type": int, "help": "Maximum number of training iterations. Overrides config file if provided."},
     ]
+    # append custom_args to custom_parameters and update existing ones
+    if custom_args is not None:
+        for key, value in vars(custom_args).items():
+            # check if parameter already exists
+            existing_param = next((param for param in custom_parameters if param['name'] == f"--{key}"), None)
+            if existing_param:
+                existing_param['default'] = value
+                print(f"Updated parameter: --{key} with default value {value}")
+            else:
+                custom_parameters.append({"name": f"--{key}", "type": type(value), "default": value, "help": f"Custom parameter: {key}"})
+                print(f"Added custom parameter: --{key} with default value {value}")
+
     # parse arguments
     args = gymutil.parse_arguments(
         description="RL Policy",
         custom_parameters=custom_parameters)
-    
-    args.debug = debug
+
     # name allignment
     args.sim_device_id = args.compute_device_id
     args.sim_device = args.sim_device_type
     if args.sim_device=='cuda':
         args.sim_device += f":{args.sim_device_id}"
-    if args.debug:
-        args.num_envs = 10
     return args
 
 def export_policy_as_jit(actor_critic, path):

@@ -65,7 +65,6 @@ class LeggedRobotNavCfg(LeggedRobotCfg):
         max_dof_bias = 0.0
         
     class rewards():
-
         tracking_sigma = 0.1 # tracking reward = exp(-error^2/sigma)
         soft_dof_pos_limit = 0.9
         base_height_target = 0.30

@@ -28,20 +28,21 @@
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
-import numpy as np
+from legged_gym import LEGGED_GYM_ROOT_DIR
 import os
-from datetime import datetime
 
 import isaacgym
 from legged_gym.envs import *
-from legged_gym.utils import get_args, task_registry
-import torch
+from legged_gym.utils import  get_args, export_policy_as_jit, task_registry, Logger
 import sys
+
+import numpy as np
 import argparse
 
 parser = argparse.ArgumentParser(description="Run the Go2 robot in navigation environment.")
 parser.add_argument("--debug", action="store_true", help="Enable debug mode.")
 parser.add_argument("--headless", action="store_true", default=False, help="Force display off at all times.")
+parser.add_argument("--load_run", type=str,  help="Name of the run to load when resume=True. If -1: will load the last run. Overrides config file if provided."),
 args = parser.parse_args()
 
 if args.debug:
@@ -55,11 +56,51 @@ if args.debug:
     debugpy.breakpoint()
 
 
-def train(args):
-    env, env_cfg = task_registry.make_env(name=args.task, args=args)
-    ppo_runner, train_cfg = task_registry.make_alg_runner(env=env, name=args.task, args=args)
-    ppo_runner.learn(num_learning_iterations=train_cfg.runner.max_iterations, init_at_random_ep_len=True)
+def play(args):
+    env: LeggedRobotNav
+    env_cfg: Go2NavFlatCfg
+
+    env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
+    # override some parameters for testing
+    env_cfg.env.num_envs = 1
+    env_cfg.debug_viz = True
+    env_cfg.terrain.num_rows = 1
+    env_cfg.terrain.num_cols = 1
+    env_cfg.terrain.curriculum = False
+    env_cfg.noise.add_noise = False
+    env_cfg.domain_rand.randomize_friction = False
+    env_cfg.domain_rand.push_robots = False
+
+    # prepare environment
+    env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
+    obs = env.get_observations()
+    # load policy
+    train_cfg.runner.resume = True
+    ppo_runner, train_cfg = task_registry.make_alg_runner(env=env, name=args.task, args=args, train_cfg=train_cfg)
+    policy = ppo_runner.get_inference_policy(device=env.device)
+    
+    # export policy as a jit module (used to run it from C++)
+    if EXPORT_POLICY:
+        path = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name, 'exported', 'policies')
+        export_policy_as_jit(ppo_runner.alg.actor_critic, path)
+        print('Exported policy as jit script to: ', path)
+
+    camera_position = np.array(env_cfg.viewer.pos, dtype=np.float64)
+    camera_direction = np.array(env_cfg.viewer.lookat) - np.array(env_cfg.viewer.pos)
+    env.set_camera(camera_position, camera_position + camera_direction)
+    img_idx = 0
+
+    for i in range(10*int(env.max_episode_length)):
+        actions = policy(obs.detach())
+        obs, _, rews, dones, infos = env.step(actions.detach())
+        if RECORD_FRAMES:
+            if i % 2:
+                filename = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs', train_cfg.runner.experiment_name, 'exported', 'frames', f"{img_idx}.png")
+                env.gym.write_viewer_image_to_file(env.viewer, filename)
+                img_idx += 1 
 
 if __name__ == '__main__':
+    EXPORT_POLICY = True
+    RECORD_FRAMES = False
     args = get_args(args)
-    train(args)
+    play(args)
