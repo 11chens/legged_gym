@@ -61,6 +61,7 @@ class BaseTask():
         self.num_obs = cfg.env.num_observations
         self.num_privileged_obs = cfg.env.num_privileged_obs
         self.num_actions = cfg.env.num_actions
+        self.num_nav_actions = cfg.env.num_nav_actions
 
         # optimization flags for pytorch JIT
         torch._C._jit_set_profiling_mode(False)
@@ -111,7 +112,7 @@ class BaseTask():
     def reset(self):
         """ Reset all robots"""
         self.reset_idx(torch.arange(self.num_envs, device=self.device))
-        obs, privileged_obs, _, _, _ = self.step(torch.zeros(self.num_envs, self.num_actions, device=self.device, requires_grad=False))
+        obs, privileged_obs, _, _, _ = self.step(torch.zeros(self.num_envs, self.num_nav_actions, device=self.device, requires_grad=False))
         return obs, privileged_obs
 
     def step(self, actions):

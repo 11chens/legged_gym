@@ -59,17 +59,23 @@ class LeggedRobotNav(LeggedRobot):
         
     def _init_buffers(self):
         """ inherit loco vars: self.commands[vx, vy, vyaw, pitch], self.actons[joint_pos]
-            add nav vars: self.nav_commands[theta, rho], self.nav_actions[vx, vy, vyaw]
+            add nav vars: self.nav_commands[theta, rho], self.nav_actions[vx, vy, vyaw] = self.commands[:, :3]
             update vars: self.obs_buf -> nav_polciy
         """
         super()._init_buffers()
         
         self.position_targets = torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device, requires_grad=False) # (x, y, z), align quat_rotate_inverse
-        self.nav_commands = torch.zeros(self.num_envs, self.cfg.commands.num_commands, dtype=torch.float, device=self.device, requires_grad=False)
-        # nav_commands_buffer: simulate transmission delay
-        self.nav_commands_buffer = torch.zeros(self.num_envs, 10, self.cfg.commands.num_commands, dtype=torch.float, device=self.device, requires_grad=False)
-        self.nav_actions = torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device, requires_grad=False)
+        self.distance = torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
+        self.nav_commands = torch.zeros(self.num_envs, self.cfg.commands.num_nav_commands, dtype=torch.float, device=self.device, requires_grad=False)
+        self.nav_commands_buffer = torch.zeros(self.num_envs, 10, self.cfg.commands.num_nav_commands, dtype=torch.float, device=self.device, requires_grad=False)
+        self.nav_actions = torch.zeros(self.num_envs, self.cfg.env.num_nav_actions, dtype=torch.float, device=self.device, requires_grad=False)
+        self.nav_actions_before_clip = torch.zeros(self.num_envs, self.cfg.env.num_nav_actions, dtype=torch.float, device=self.device, requires_grad=False)
+        self.last_nav_actions = torch.zeros(self.num_envs, self.cfg.env.num_nav_actions, dtype=torch.float, device=self.device, requires_grad=False)
         self.last_dof_actions = torch.zeros(self.num_envs, 12, dtype=torch.float, device=self.device, requires_grad=False)
+        
+        self.nav_clip_min = torch.tensor([self.cfg.commands.ranges.limit_vx[0], self.cfg.commands.ranges.limit_vy[0], self.cfg.commands.ranges.limit_vyaw[0]], dtype=torch.float, device=self.device, requires_grad=False)
+        self.nav_clip_max = torch.tensor([self.cfg.commands.ranges.limit_vx[1], self.cfg.commands.ranges.limit_vy[1], self.cfg.commands.ranges.limit_vyaw[1]], dtype=torch.float, device=self.device, requires_grad=False)
+
         self.slr_obs_buf = torch.zeros(
                 self.num_envs, 45, device=self.device, dtype=torch.float)
         self.slr_obs_hist = torch.zeros(
@@ -92,7 +98,7 @@ class LeggedRobotNav(LeggedRobot):
         """ nav_actions (loco_cmds) -> loco_actions (self.commands)
             a hacky implementation
         """
-        self.commands = nav_actions # vx, vy, vyaw, pitch
+        self.commands[:, :self.num_nav_actions] = nav_actions # vx, vy, vyaw
         props = self._compute_loco_observations()
         ang_vel = self.base_ang_vel[:, 2:] * self.obs_scales.ang_vel
         lin_vel_pred = self.slr_encoder_vel(self.slr_obs_hist.view(self.num_envs, -1))
@@ -109,7 +115,7 @@ class LeggedRobotNav(LeggedRobot):
         props = torch.cat((
                 self.base_ang_vel * self.obs_scales.ang_vel, # 3
                 self.projected_gravity, # 3
-                self.commands[:, :3] * self.commands_scale,
+                self.commands * self.commands_scale,
                 self.reindex((self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos),
                 self.reindex(self.dof_vel * self.obs_scales.dof_vel),
                 self.last_dof_actions),dim=-1)
@@ -164,8 +170,7 @@ class LeggedRobotNav(LeggedRobot):
         """
         if not self.init_done:
             return
-        distance = torch.norm(self.root_states[env_ids, :2] - self.position_targets[env_ids, :2], dim=1)
-        move_up = distance < 0.35
+        move_up = self.distance < 0.2
         self.terrain_levels[env_ids] += 1 * move_up 
         self.terrain_levels[env_ids] = torch.where(self.terrain_levels[env_ids]>=self.max_terrain_level,
                                                    torch.randint_like(self.terrain_levels[env_ids], self.max_terrain_level),
@@ -178,18 +183,19 @@ class LeggedRobotNav(LeggedRobot):
         """
         return tensor[:,[3,4,5,0,1,2,9,10,11,6,7,8]]
 
-    def step(self, actions):
+    def step(self, nav_actions):
         """ origin: loco policy (dim12) -> act2tq
             new: nav policy (dim 3): loco_cmds -> act (dim 12)
         """
         # _compute_actions: loco_cmds -> loco_actions
-        self.nav_actions = torch.clip(actions, -3.0, 3.0).to(self.device)
+        self.nav_actions_before_clip = nav_actions.to(self.device)
+        self.nav_actions = torch.clip(self.nav_actions_before_clip, min=self.nav_clip_min, max=self.nav_clip_max)
         actions = self._compute_actions(self.nav_actions)
         self.last_dof_actions = actions
         actions = self.reindex(actions)
         
         clip_actions = self.cfg.normalization.clip_actions
-        self.actions = torch.clip(actions, -clip_actions, clip_actions).to(self.device)
+        self.actions = torch.clip(actions, -clip_actions, clip_actions)
         # step physics and render each frame
         self.render()
         for _ in range(self.cfg.control.decimation):
@@ -232,6 +238,7 @@ class LeggedRobotNav(LeggedRobot):
         self.compute_observations() # [new] update nav_commands for nav policy
 
         self.last_actions[:] = self.actions[:]
+        self.last_nav_actions[:] = self.nav_actions[:]
         self.last_dof_vel[:] = self.dof_vel[:]
         self.last_root_vel[:] = self.root_states[:, 7:13]
 
@@ -245,10 +252,15 @@ class LeggedRobotNav(LeggedRobot):
         """
         env_ids = (self.episode_length_buf % int(self.cfg.commands.resampling_time / self.dt)==0).nonzero(as_tuple=False).flatten()
         self._resample_commands(env_ids, on_the_way=True)
+
         # pos in world -> pos in robot
         pos_diff = self.position_targets - self.root_states[:, 0:3]
         self.goal_xy_base = quat_rotate_inverse(yaw_quat(self.base_quat[:]), pos_diff)[:, :2] 
         self.nav_commands = cart2polar(self.goal_xy_base) # theta, rho
+
+        # update distance and reach_goal
+        self.distance = torch.norm(self.root_states[:, :2] - self.position_targets[:, :2], dim=1)
+        self.reach_goal = self.distance < self.sigma
 
         self.nav_commands_buffer = torch.where(
             (self.episode_length_buf <= 1)[:, None, None],
@@ -301,14 +313,26 @@ class LeggedRobotNav(LeggedRobot):
     #### rewards
 
     def _reward_reach_target(self):
-        distance = torch.norm(self.position_targets[:, :2] - self.root_states[:, :2], dim=1)
-        self.reach_goal = distance < self.sigma
-        return (1. /(1. + 10*torch.square(distance))) * self.reach_goal.float()
-        # return torch.exp(-distance/self.cfg.rewards.tracking_sigma) * self.reach_goal.float()
+        return (1. /(1. + 10*torch.square(self.distance))) * self.reach_goal
     
     def _reward_stand_still(self):
-        # Penalize motion at zero commands
-        distance = torch.norm(self.position_targets[:, :2] - self.root_states[:, :2], dim=1)
-        ang_vel = torch.abs(self.base_ang_vel[:, 2]) 
-        lin_vel = torch.abs(self.base_lin_vel[:, 0]) + torch.abs(self.base_lin_vel[:, 1])
-        return (lin_vel + ang_vel) * (distance < 0.2)     
+        actions_norm = torch.norm(torch.abs(self.nav_actions), dim=-1) 
+        return (1. /(1. + 10*torch.square(actions_norm))) * (self.distance < 0.2)
+    
+    def _reward_backward(self): 
+        return (self.base_lin_vel[:, 0] < -0.2) * (~self.reach_goal)
+    
+    def _reward_nav_action_rate(self):
+        return torch.square(torch.norm(self.nav_actions - self.last_nav_actions, dim=-1))
+
+    def _reward_nav_action_limit(self):
+        return torch.square(torch.norm(self.nav_actions - self.nav_actions_before_clip, dim=-1))
+    
+    # TODO: def FOV, penalize the goal position if it is not in the FOV
+    def _reward_fov_missing(self):
+        """ Reward for missing the goal position in the FOV
+        """
+        pass
+
+
+

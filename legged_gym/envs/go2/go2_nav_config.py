@@ -34,7 +34,8 @@ from legged_gym.envs.base.legged_robot_nav_config import LeggedRobotNavCfg
 class Go2NavFlatCfg( LeggedRobotNavCfg ):
     debug_viz = False
     class env(LeggedRobotNavCfg.env):
-        num_observations = 23
+        num_observations = 14
+        num_nav_actions = 3
         num_envs = 2048
         episode_length_s = 20 # episode length in seconds  # will be randomized in [s-minus, s]
         no_nav = True
@@ -69,11 +70,16 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
     class commands:
         curriculum = False
         max_curriculum = 1.
-        num_commands = 2
+        num_commands = 3
+        num_nav_commands = 2
         dis_update = 0.35
         resampling_time = 4
         delay_time = 0.1 # delay time in seconds
         class ranges:
+            limit_vx = [-0.25, 1.0]  # [m/s]
+            limit_vy = [-0.3, 0.3]  # [m/s]
+            limit_vyaw = [-1.0, 1.0]  # [rad/s]
+
             use_polar = False
             # if use polar: it is rho and theta, else x and y
             pos_1 = [1.5, 7.5] # min max [m] 
@@ -167,16 +173,17 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
 
     class rewards():
         class scales():
-            nomove = -0.0 # -200.0 
             reach_target = 10.0 # 50.0 
-            stand_still = -1.0
+            stand_still = 2.0
             lin_vel_z = -10.0 # -3.0 
             ang_vel_xy = -0.5 
             orientation = -5.0
             torques = -0.0002
             cmds_track = 0.0 # -0.2 
-            cmds_rate = -0.00 # -0.5 
+            nav_action_rate = -0.5
+            nav_action_limit = -5.0
             action_rate = -0.01 # -0.005 
+            backward = 0.0
 
         soft_dof_pos_limit = 0.95
         base_height_target = 0.25
@@ -201,7 +208,7 @@ class Go2NavFlatCfgPPO( LeggedRobotCfgPPO ):
         experiment_name = 'go2_nav_flat'
 
         save_interval = 500  # save model every n iterations
-        max_iterations = 6000  # maximum number of training iterations
+        max_iterations = 5000  # maximum number of training iterations
         
         policy_class_name = 'ActorCritic'
         algorithm_class_name = 'PPO'
