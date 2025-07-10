@@ -173,8 +173,9 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
 
     class rewards():
         class scales():
+            heading_target = 1.0
             reach_target = 10.0 # 50.0 
-            stand_still = 2.0
+            stand_still = 5.0
             lin_vel_z = -10.0 # -3.0 
             ang_vel_xy = -0.5 
             orientation = -5.0

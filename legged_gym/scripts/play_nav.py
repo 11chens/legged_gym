@@ -89,6 +89,7 @@ def play(args):
     camera_direction = np.array(env_cfg.viewer.lookat) - np.array(env_cfg.viewer.pos)
     env.set_camera(camera_position, camera_position + camera_direction)
     img_idx = 0
+    # TODO: video recording
 
     for i in range(10*int(env.max_episode_length)):
         actions = policy(obs.detach())

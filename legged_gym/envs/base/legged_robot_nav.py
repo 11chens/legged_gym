@@ -327,8 +327,15 @@ class LeggedRobotNav(LeggedRobot):
 
     def _reward_nav_action_limit(self):
         return torch.square(torch.norm(self.nav_actions - self.nav_actions_before_clip, dim=-1))
+
+    def _reward_heading_target(self):
+        forward = quat_apply(self.base_quat, self.forward_vec)
+        xy_dif = self.position_targets[:,:2] - self.root_states[:, :2]
+        xy_dif = xy_dif / (0.001 + torch.norm(xy_dif, dim=1).unsqueeze(1))
+        dir_cos = forward[:,0] * xy_dif[:,0] + forward[:,1] * xy_dif[:,1]
+        return torch.exp(dir_cos) * (~self.reach_goal) + 2.0 * self.reach_goal
     
-    # TODO: def FOV, penalize the goal position if it is not in the FOV
+    # TODO: def FOV, penalize that the goal position is not in the FOV
     def _reward_fov_missing(self):
         """ Reward for missing the goal position in the FOV
         """
