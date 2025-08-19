@@ -47,7 +47,7 @@ args = parser.parse_args()
 if args.debug:
     import debugpy
 
-    ip_address = ("0.0.0.0", 6789)
+    ip_address = ("0.0.0.0", 9999)
     print(f"Process: {sys.argv[:]}")
     print(f"Is waiting for attach at {ip_address[0]}:{ip_address[1]}", flush=True)
     debugpy.listen(ip_address)

@@ -512,7 +512,7 @@ class LeggedRobot(BaseTask):
         self.last_dof_vel = torch.zeros_like(self.dof_vel)
         self.last_root_vel = torch.zeros_like(self.root_states[:, 7:13])
         self.commands = torch.zeros(self.num_envs, self.cfg.commands.num_commands, dtype=torch.float, device=self.device, requires_grad=False) # x vel, y vel, yaw vel, heading
-        self.commands_scale = torch.tensor([self.obs_scales.lin_vel, self.obs_scales.lin_vel, self.obs_scales.ang_vel], device=self.device, requires_grad=False,) # TODO change this
+        self.commands_scale = torch.tensor([self.obs_scales.lin_vel, self.obs_scales.lin_vel, self.obs_scales.ang_vel, self.obs_scales.pitch], device=self.device, requires_grad=False,) # TODO change this
         self.feet_air_time = torch.zeros(self.num_envs, self.feet_indices.shape[0], dtype=torch.float, device=self.device, requires_grad=False)
         self.last_contacts = torch.zeros(self.num_envs, len(self.feet_indices), dtype=torch.bool, device=self.device, requires_grad=False)
         self.base_lin_vel = quat_rotate_inverse(self.base_quat, self.root_states[:, 7:10])
@@ -668,6 +668,7 @@ class LeggedRobot(BaseTask):
         env_upper = gymapi.Vec3(0., 0., 0.)
         self.actor_handles = []
         self.envs = []
+        self.cam_handles = []
         for i in range(self.num_envs):
             # create env instance
             env_handle = self.gym.create_env(self.sim, env_lower, env_upper, int(np.sqrt(self.num_envs)))
@@ -685,6 +686,7 @@ class LeggedRobot(BaseTask):
             self.gym.set_actor_rigid_body_properties(env_handle, actor_handle, body_props, recomputeInertia=True)
             self.envs.append(env_handle)
             self.actor_handles.append(actor_handle)
+            self.attach_camera(env_handle, actor_handle)
 
         self.feet_indices = torch.zeros(len(feet_names), dtype=torch.long, device=self.device, requires_grad=False)
         for i in range(len(feet_names)):
@@ -757,6 +759,9 @@ class LeggedRobot(BaseTask):
                 z = heights[j]
                 sphere_pose = gymapi.Transform(gymapi.Vec3(x, y, z), r=None)
                 gymutil.draw_lines(sphere_geom, self.gym, self.viewer, self.envs[i], sphere_pose) 
+
+    def attach_camera(self, env_handle, actor_handle):
+        pass
 
     def _init_height_points(self):
         """ Returns points at which the height measurments are sampled (in base frame)
