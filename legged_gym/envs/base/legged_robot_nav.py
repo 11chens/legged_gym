@@ -56,7 +56,7 @@ class LeggedRobotNav(LeggedRobot):
         super().__init__(cfg, sim_params, physics_engine, sim_device, headless)
 
         self.debug_viz = self.cfg.debug_viz
-        self.sigma = 0.5
+        self.sigma = 0.1
         self.camera_sensor = CameraSensor(
             batch_size=self.num_envs, 
             cfg=self.cfg.camera_sensor,
@@ -265,13 +265,20 @@ class LeggedRobotNav(LeggedRobot):
         if self.viewer and self.enable_viewer_sync and self.debug_viz:
             self._draw_debug_vis()
 
+    def check_termination(self):
+        """ Check if environments need to be reset
+        """
+        self.reset_buf = torch.any(torch.norm(self.contact_forces[:, self.termination_contact_indices, :], dim=-1) > 1., dim=1)
+        self.time_out_buf = self.episode_length_buf > self.max_episode_length # no terminal reward for time-outs
+        self.reset_buf |= self.time_out_buf
+        self.reset_buf |= (self.out_of_view * self.reach_goal)
 
     def _post_physics_step_callback(self):
         """ origin: resample_cmds[env_ids] at resampling_time
             new: update nav_commands every step
         """
         env_ids = (self.episode_length_buf % int(self.cfg.commands.resampling_time / self.dt)==0).nonzero(as_tuple=False).flatten()
-        self._resample_commands(env_ids, on_the_way=True)
+        # self._resample_commands(env_ids, on_the_way=True)
 
         # pos in world -> pos in robot
         pos_diff = self.position_targets - self.root_states[:, 0:3]
@@ -279,22 +286,26 @@ class LeggedRobotNav(LeggedRobot):
 
         # update distance and reach_goal
         self.distance = torch.norm(self.root_states[:, :2] - self.position_targets[:, :2], dim=1)
-        self.reach_goal = self.distance < self.sigma
+        self.reach_goal = self.distance < (self.sigma)
 
         self.P_camera, self.P_image = self.camera_sensor.transform(self.goal_base)
         self.out_of_view = (self.P_image == -1).any(dim=-1)
-        self.distance = torch.where(
+        self.depth = torch.where(
             self.out_of_view,
-            torch.ones_like(self.distance) * -1,  # set to -1 if out of view
-            self.distance
+            torch.ones_like(self.P_camera[:, -1]) * -1,  # set to -1 if out of view
+            self.P_camera[:, -1]
         )
 
         # self.nav_commands = cart2polar(goal_base[:, :2])  # theta, rho
         self.nav_commands = torch.cat([
             self.P_image,
-            self.distance.unsqueeze(1),
+            # self.distance.unsqueeze(1),
+            self.depth.unsqueeze(1)
         ], dim=-1)  # (img_x, img_y, distance)
-        
+
+        # self.nav_commands = self.P_image
+
+
         self.nav_commands_buffer = torch.where(
             (self.episode_length_buf <= 1)[:, None, None],
             torch.stack([self.nav_commands] * self.nav_commands_buffer.shape[1], dim=1),
@@ -320,16 +331,16 @@ class LeggedRobotNav(LeggedRobot):
         if len(env_ids) > 0:
             if on_the_way:
                 # simulate a tracking jitter
-                sim_move_pos = torch_rand_float(-2.0, 2.0, (len(env_ids), 2), device=self.device)
+                sim_move_pos = torch_rand_float(-1.0, 1.0, (len(env_ids), 2), device=self.device)
                 self.position_targets[env_ids, :2] += sim_move_pos * enbale_rand
                 sim_up_down_pos = torch_rand_float(-0.5, 0.5, (len(env_ids), 1), device=self.device)
                 self.position_targets[env_ids, 2:3] += sim_up_down_pos * enbale_rand
-                self.position_targets[env_ids, 2:3] = torch.clip(self.position_targets[env_ids, 2:3], 0.1, 1.0)
+                self.position_targets[env_ids, 2:3] = torch.clip(self.position_targets[env_ids, 2:3], 0.0, 0.2)
                 
             else:
-                _target_x = torch_rand_float(0.4, 3.0, (len(env_ids), 1), device=self.device)
+                _target_x = torch_rand_float(0.3, 5.0, (len(env_ids), 1), device=self.device)
                 _target_y = torch_rand_float(-2.0, 2.0, (len(env_ids), 1), device=self.device)
-                _target_z = torch_rand_float(-0.1, 1.0, (len(env_ids), 1), device=self.device)
+                _target_z = torch_rand_float(-0.0, 0.2, (len(env_ids), 1), device=self.device) # simulate object on the ground
                 self.position_targets[env_ids, 0:1] = self.env_origins[env_ids, 0:1] + _target_x * enbale_rand
                 self.position_targets[env_ids, 1:2] = self.env_origins[env_ids, 1:2] + _target_y * enbale_rand
                 self.position_targets[env_ids, 2:3] = self.env_origins[env_ids, 2:3] + _target_z * enbale_rand
@@ -370,7 +381,7 @@ class LeggedRobotNav(LeggedRobot):
             sphere_pose = gymapi.Transform(gymapi.Vec3(x, y, z), r=None)
             gymutil.draw_lines(sphere_blue, self.gym, self.viewer, self.envs[i], sphere_pose) 
 
-        self.camera_sensor.visualize_img_coords(P_base=self.position_targets[0], P_camera=self.P_camera[0], P_image=self.P_image[0])
+        self.camera_sensor.visualize_img_coords(P_base=self.goal_base[0], P_camera=self.P_camera[0], P_image=self.P_image[0])
         # if hasattr(self, 'image'):
             # image = self.image.detach().cpu().numpy()
             # self.camera_sensor.visualize_img(image)
@@ -431,15 +442,12 @@ class LeggedRobotNav(LeggedRobot):
     #### rewards
 
     def _reward_reach_target(self):
-        return (1. /(1. + 100*torch.square(self.distance))) * self.reach_goal
-        # return torch.exp(-self.distance/self.cfg.rewards.tracking_sigma)
+        # return (1. /(1. + 100*torch.square(self.distance)))
+        return torch.exp(-self.distance/self.cfg.rewards.tracking_sigma)
     
     def _reward_stand_still(self):
-        actions_norm = torch.norm(torch.abs(self.nav_actions), dim=-1) 
-        return (1. /(1. + 10*torch.square(actions_norm))) * (self.distance < 0.1)
-    
-    def _reward_backward(self): 
-        return (self.base_lin_vel[:, 0] < -0.2) * (~self.reach_goal)
+        actions_norm = torch.norm(torch.abs(self.nav_actions[:, :3]), dim=-1) 
+        return (1. /(1. + 10*torch.square(actions_norm))) * (self.reach_goal)
     
     def _reward_orientation_y(self):
         # print(f"projected_gravity: {self.projected_gravity}")
@@ -455,30 +463,47 @@ class LeggedRobotNav(LeggedRobot):
         forward = quat_apply(self.base_quat, self.forward_vec)
         xy_dif = self.position_targets[:,:2] - self.root_states[:, :2]
         xy_dif = xy_dif / (0.001 + torch.norm(xy_dif, dim=1).unsqueeze(1))
+        # theta_error: 
         dir_cos = forward[:,0] * xy_dif[:,0] + forward[:,1] * xy_dif[:,1]
-        return torch.square(dir_cos) * (~self.reach_goal) * (dir_cos>0.95) + 2.0 * self.reach_goal
+        # theta_error = torch.acos(dir_cos)
+        theta_error = 1.0 - dir_cos
+        return torch.exp(-theta_error / 0.01) * (dir_cos > 0.99)
+        # return torch.exp(-theta_error / 0.01) * (~self.reach_goal)  + 2.0 * self.reach_goal
     
-    # TODO: def view, penalize that the goal position is not in the view
     def _reward_view_missing(self):
         """ Reward for missing the goal position in the view
         """
-        lower_head = self.base_euler[:, 1] > 0.0
-        # return self.out_of_view.float() * lower_head.float()
         return self.out_of_view.float()
 
-    def _reward_view_center(self):
-        """ Reward for align the goal position with the center of the view
+    def _reward_lin_vel_y(self):
+        return torch.abs(self.base_lin_vel[:, 1])
+    
+    # def _reward_tracking_view_center(self):
+    #     """ Reward for align the goal position with the center of the view
+    #     """
+    #     align_error = torch.square((self.P_image[:, 0] - 0.5)) + torch.square((self.P_image[:, 1] - 0.5))
+    #     return torch.exp(-align_error / 0.01)
+    
+    def _reward_tracking_horizontal_distance(self):
+        """ Reward for tracking the horizontal distance to the goal position
         """
-        align_error = (self.P_image[:, 0] - 0.5) ** 2 + (self.P_image[:, 1] - 0.5) ** 2
-        # align_error = torch.abs((self.P_image[:, 1] - 0.5))
-        return torch.exp(-align_error/0.01)
+        dy_error = torch.square(self.goal_base[:, 1])
+        return torch.exp(-dy_error / 0.01)
 
-    def _reward_error_head(self):
-        object_in_upper = ((self.P_image[:, 1] - 0.45) < 0.0) 
-        object_in_lower = (self.P_image[:, 1] - 0.55) > 0.0
-        return 1.0 * (object_in_upper | object_in_lower) * torch.abs((self.P_image[:, 1] - 0.5))
+    def _reward_horizontal_distance_error(self):
+        # Penalize large horizontal distance error
+        target_grasp_width = 0.1
+        dy_error = torch.abs(self.goal_base[:, 1]) - target_grasp_width
+        dy_error = torch.clip(dy_error, min=0.0)
+        return torch.square(dy_error)
+    
+    def _reward_keep_forward(self):
+        # robot keep move at speed 
+        target_vx = 0.35 # m/s
+        lin_vel_error = torch.square(target_vx - self.base_lin_vel[:, 0])
+        return torch.exp(-lin_vel_error/self.cfg.rewards.tracking_sigma)
 
-    def _reward_upper_head(self):
-        object_in_upper = ((self.P_image[:, 1] - 0.35) < 0.0) 
-        upper_head = self.base_euler[:, 1] < 0.0
-        return object_in_upper * upper_head.float()
+    def _reward_reach_grasp_area(self):
+        target_grasp_width = 0.1
+        grasp_area = (torch.abs(self.goal_base[:, 1]) < (target_grasp_width/2.0))
+        return self.reach_goal * grasp_area.float()

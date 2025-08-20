@@ -47,7 +47,6 @@ class LeggedRobotNavCfg(LeggedRobotCfg):
         curriculum = False
         max_curriculum = 1.
         num_commands = 3
-        dis_update = 0.35
         class ranges:
             pos_rho = [1.0, 3.0] # min max [m]
             pos_theta = [-3.14, 3.14]  # rad

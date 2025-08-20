@@ -121,6 +121,7 @@ def play(args):
         # print(f"P_base: ({dx:.2f},{dy:.2f},{dz:.2f})")
         print(f"Action: ({cx:.2f}, {cy:.2f}, {cyaw:.2f}, {cpitch:.2f})")
         print(f"Base: ({vx:.2f}, {vy:.2f}, {vyaw:.2f}, {pitch:.2f})")
+        print(f"Distance: ({env.distance[0]:.2f})")
         
 if __name__ == '__main__':
     EXPORT_POLICY = True
