@@ -38,10 +38,10 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
     debug_viz = False
     class env(LeggedRobotNavCfg.env):
         num_position = 3 # x, y, z
-        num_props = 9 # lin_vel, ang_vel, gravity
         num_nav_actions = 4 # vx, vy, vyaw, pitch
-        history_len = 5
-        num_observations = (NUM_NAV_COMMANDS + num_props + num_nav_actions) * history_len
+        history_len = 10
+        num_props = NUM_NAV_COMMANDS + num_nav_actions + 9 # lin_vel, ang_vel, gravity
+        num_observations = num_props * history_len
         num_envs = 2048
         episode_length_s = 16 # episode length in seconds  # will be randomized in [s-minus, s]
         no_nav = True
@@ -201,7 +201,7 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
 
     class rewards():
         class scales():
-            heading_target = 1.0 # 1.0
+            heading_target = 2.0 # 1.0
             lin_vel_z = -1.0 # -3.0 
             ang_vel_xy =  -0.2 
             orientation_y = -1.0
@@ -210,11 +210,11 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
             view_missing = -0.5
             tracking_horizontal_distance = 1.0
             horizontal_distance_error = -0.5
-            keep_forward = 1.0 # 1.0
-            reach_grasp_area = 1000.0
+            keep_forward = 2.0 # 1.0
+            reach_grasp_area = 1e3
             # lin_vel_y = -0.1
 
-            stand_still = 50.0 # 1.0
+            stand_still = 100.0 # 1.0
             action_rate = 0.0 # -0.01 # -0.005 
             cmds_track = 0.0 # -0.2 
             torques = 0.0 #  -0.0002
@@ -246,5 +246,5 @@ class Go2NavFlatCfgPPO( LeggedRobotCfgPPO ):
         save_interval = 200  # save model every n iterations
         max_iterations = 5000  # maximum number of training iterations
         
-        policy_class_name = 'ActorCritic'
+        policy_class_name = 'ActorCriticRnn'
         algorithm_class_name = 'PPO'

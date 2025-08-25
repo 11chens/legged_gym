@@ -114,7 +114,7 @@ class CameraSensor:
         """
         # 随机采样欧拉角（单位：度）
         yaw = torch.rand(self.batch_size, 1, device=self.device) * 20 - 10   # 偏航角范围 [-10°, 10°]
-        pitch = torch.rand(self.batch_size, 1, device=self.device) * 60 - 30 # 俯仰角范围 [-30°, 30°]
+        pitch = torch.rand(self.batch_size, 1, device=self.device) * 40 - 20 # 俯仰角范围 [-20, 20]
         roll = torch.rand(self.batch_size, 1, device=self.device) * 20 - 10  # 翻滚角范围 [-10°, 10°]
         self.angles = torch.cat([yaw, pitch, roll], dim=-1)
         self.R = torch.empty((self.batch_size, 3, 3), device=self.device)
@@ -127,8 +127,8 @@ class CameraSensor:
 
         # 随机采样相机光心在基座坐标系中的位置 T = [dx, dy, dz]
         dx = torch.rand(self.batch_size, 1, device=self.device) * 0.3 + 0.3   # x 方向位移范围 [0.3, 0.6]
-        dy = torch.rand(self.batch_size, 1, device=self.device) * 0.6 - 0.3   # y 方向位移范围 [-0.3, 0.3]
-        dz = torch.rand(self.batch_size, 1, device=self.device) * 0.6 - 0.3   # z 方向位移范围 [-0.3, 0.3]
+        dy = torch.rand(self.batch_size, 1, device=self.device) * 0.2 - 0.1   # y 方向位移范围 [-0.1, 0.1]
+        dz = torch.rand(self.batch_size, 1, device=self.device) * 0.4 - 0.2   # z 方向位移范围 [-0.2, 0.2]
         self.T = torch.cat([dx, dy, dz], dim=-1)
 
 

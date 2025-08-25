@@ -75,7 +75,7 @@ def play(args):
 
     # prepare environment
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
-    obs_dict = env.get_obs_dict()
+    obs = env.get_observations()
     # load policy
     train_cfg.runner.resume = True
     ppo_runner, train_cfg = task_registry.make_alg_runner(env=env,
@@ -99,9 +99,8 @@ def play(args):
 
     # TODO: video recording
     for i in range(20 * int(env.max_episode_length)):
-        obs, critic_obs = ppo_runner.alg.compute_obs_from_dict(obs_dict)
         actions = policy(obs.detach())
-        obs_dict, _, rews, dones, infos = env.step(actions.detach())
+        obs, _, rews, dones, infos = env.step(actions.detach())
         dx = env.goal_base[0, 0].item()
         dy = env.goal_base[0, 1].item()
         dz = env.goal_base[0, 2].item()
@@ -119,9 +118,9 @@ def play(args):
 
 
         # print(f"P_base: ({dx:.2f},{dy:.2f},{dz:.2f})")
-        print(f"Action: ({cx:.2f}, {cy:.2f}, {cyaw:.2f}, {cpitch:.2f})")
-        print(f"Base: ({vx:.2f}, {vy:.2f}, {vyaw:.2f}, {pitch:.2f})")
-        print(f"Distance: ({env.distance[0]:.2f})")
+        # print(f"Action: ({cx:.2f}, {cy:.2f}, {cyaw:.2f}, {cpitch:.2f})")
+        # print(f"Base: ({vx:.2f}, {vy:.2f}, {vyaw:.2f}, {pitch:.2f})")
+        # print(f"Distance: ({env.distance[0]:.2f})")
         
 if __name__ == '__main__':
     EXPORT_POLICY = True

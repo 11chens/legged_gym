@@ -70,7 +70,6 @@ class LeggedRobotNav(LeggedRobot):
         """
         super()._init_buffers()
         
-        self.obs_dict = {}
         self.position_targets = torch.zeros(self.num_envs, self.cfg.env.num_position, dtype=torch.float, device=self.device, requires_grad=False) # (x, y, z), align quat_rotate_inverse
         self.goal_base = torch.zeros(self.num_envs, self.cfg.env.num_position, dtype=torch.float, device=self.device, requires_grad=False)
         self.distance = torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
@@ -84,8 +83,7 @@ class LeggedRobotNav(LeggedRobot):
 
         self.nav_actions_buffer = torch.zeros(self.num_envs, self.cfg.env.history_len, self.cfg.env.num_nav_actions, dtype=torch.float, device=self.device, requires_grad=False)
         self.nav_commands_buffer = torch.zeros(self.num_envs, self.cfg.env.history_len, self.cfg.commands.num_nav_commands, dtype=torch.float, device=self.device, requires_grad=False)
-        self.props_buffer = torch.zeros(self.num_envs, self.cfg.env.history_len, self.cfg.env.num_props, dtype=torch.float, device=self.device, requires_grad=False)
-        
+        self.obs_hist_buffer = torch.zeros(self.num_envs, self.cfg.env.history_len, self.cfg.env.num_props, dtype=torch.float, device=self.device, requires_grad=False)
         self.nav_clip_min = torch.tensor([self.cfg.commands.ranges.limit_vx[0], self.cfg.commands.ranges.limit_vy[0], self.cfg.commands.ranges.limit_vyaw[0], self.cfg.commands.ranges.limit_pitch[0]], dtype=torch.float, device=self.device, requires_grad=False)
         self.nav_clip_max = torch.tensor([self.cfg.commands.ranges.limit_vx[1], self.cfg.commands.ranges.limit_vy[1], self.cfg.commands.ranges.limit_vyaw[1], self.cfg.commands.ranges.limit_pitch[1]], dtype=torch.float, device=self.device, requires_grad=False)
 
@@ -164,7 +162,7 @@ class LeggedRobotNav(LeggedRobot):
         self.loco_obs_hist[env_ids, :, :] = 0.
         self.nav_commands_buffer[env_ids, :, :] = 0.
         self.nav_actions_buffer[env_ids, :, :] = 0.
-        self.props_buffer[env_ids, :, :] = 0.
+        self.obs_hist_buffer[env_ids, :, :] = 0.
 
         # fill extras
         self.extras["episode"] = {}
@@ -227,7 +225,7 @@ class LeggedRobotNav(LeggedRobot):
 
         if self.privileged_obs_buf is not None:
             self.privileged_obs_buf = torch.clip(self.privileged_obs_buf, -clip_obs, clip_obs)
-        return self.obs_dict, self.privileged_obs_buf, self.rew_buf, self.reset_buf, self.extras
+        return self.obs_buf, self.privileged_obs_buf, self.rew_buf, self.reset_buf, self.extras
     
     def post_physics_step(self):
         """ Retain the original code
@@ -297,21 +295,18 @@ class LeggedRobotNav(LeggedRobot):
         )
 
         # self.nav_commands = cart2polar(goal_base[:, :2])  # theta, rho
-        self.nav_commands = torch.cat([
-            self.P_image,
-            # self.distance.unsqueeze(1),
-            self.depth.unsqueeze(1)
+        env_ids = (self.episode_length_buf % int(self.cfg.commands.delay_time / self.dt)==0).nonzero(as_tuple=False).flatten()
+        self.nav_commands[env_ids] = torch.cat([
+            self.P_image[env_ids],
+            self.depth[env_ids].unsqueeze(1)
         ], dim=-1)  # (img_x, img_y, distance)
 
-        # self.nav_commands = self.P_image
-
-
-        self.nav_commands_buffer = torch.where(
-            (self.episode_length_buf <= 1)[:, None, None],
-            torch.stack([self.nav_commands] * self.nav_commands_buffer.shape[1], dim=1),
+        self.nav_commands_buffer[env_ids] = torch.where(
+            (self.episode_length_buf[env_ids] <= 1)[:, None, None],
+            torch.stack([self.nav_commands[env_ids]] * self.nav_commands_buffer[env_ids].shape[1], dim=1),
             torch.cat([
-                self.nav_commands_buffer[:, 1:],
-                self.nav_commands.unsqueeze(1)
+                self.nav_commands_buffer[env_ids, 1:],
+                self.nav_commands[env_ids].unsqueeze(1)
             ], dim=1)
         )  
 
@@ -348,25 +343,24 @@ class LeggedRobotNav(LeggedRobot):
     def compute_observations(self):
         """ Computes observations for updating nav agent
         """
-        # goal_base = self.nav_commands_buffer[:, -int(self.cfg.commands.delay_time / self.dt), :]
-        # prop
-        self.obs_buf = torch.cat((  self.base_lin_vel * self.obs_scales.lin_vel,
-                                    self.base_ang_vel * self.obs_scales.ang_vel,
-                                    self.projected_gravity,
-                                    ),dim=-1)
-        self.props_buffer = torch.where(
+        obs_buf = torch.cat([
+            self.base_lin_vel * self.obs_scales.lin_vel,
+            self.base_ang_vel * self.obs_scales.ang_vel,
+            self.projected_gravity,
+            self.nav_commands, 
+            self.nav_actions
+            ], dim=-1)
+
+        self.obs_hist_buffer = torch.where(
             (self.episode_length_buf <= 1)[:, None, None],
-            torch.stack([self.obs_buf] * self.cfg.env.history_len, dim=1),
+            torch.stack([obs_buf] * self.cfg.env.history_len, dim=1),
             torch.cat([
-                self.props_buffer[:, 1:],
-                 self.obs_buf.unsqueeze(1)
+                self.obs_hist_buffer[:, 1:],
+                obs_buf.unsqueeze(1)
             ], dim=1)
         )
-
-        self.obs_dict["goal_history"] = self.nav_commands_buffer.view(self.num_envs, -1)
-        self.obs_dict["action_history"] = self.nav_actions_buffer.view(self.num_envs, -1)
-        self.obs_dict["prop_history"] = self.props_buffer.view(self.num_envs, -1)
-        # self.obs_dict["goal_base"] = self.goal_base
+        
+        self.obs_buf = self.obs_hist_buffer.view(self.num_envs, -1)
 
     def _draw_debug_vis(self):
         """ Draw position targets
@@ -467,7 +461,7 @@ class LeggedRobotNav(LeggedRobot):
         dir_cos = forward[:,0] * xy_dif[:,0] + forward[:,1] * xy_dif[:,1]
         # theta_error = torch.acos(dir_cos)
         theta_error = 1.0 - dir_cos
-        return torch.exp(-theta_error / 0.01) * (dir_cos > 0.99)
+        return torch.exp(-theta_error / 0.01) * (dir_cos > 0.99) + 5.0 * self.reach_goal
         # return torch.exp(-theta_error / 0.01) * (~self.reach_goal)  + 2.0 * self.reach_goal
     
     def _reward_view_missing(self):
