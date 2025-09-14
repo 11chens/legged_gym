@@ -56,7 +56,7 @@ class LeggedRobotNav(LeggedRobot):
         super().__init__(cfg, sim_params, physics_engine, sim_device, headless)
 
         self.debug_viz = self.cfg.debug_viz
-        self.sigma = 0.1
+        self.sigma = 0.35
         self.camera_sensor = CameraSensor(
             batch_size=self.num_envs, 
             cfg=self.cfg.camera_sensor,
@@ -69,7 +69,7 @@ class LeggedRobotNav(LeggedRobot):
             update vars: self.obs_buf -> nav_polciy
         """
         super()._init_buffers()
-        
+                
         self.position_targets = torch.zeros(self.num_envs, self.cfg.env.num_position, dtype=torch.float, device=self.device, requires_grad=False) # (x, y, z), align quat_rotate_inverse
         self.goal_base = torch.zeros(self.num_envs, self.cfg.env.num_position, dtype=torch.float, device=self.device, requires_grad=False)
         self.distance = torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
@@ -87,12 +87,14 @@ class LeggedRobotNav(LeggedRobot):
         self.nav_clip_min = torch.tensor([self.cfg.commands.ranges.limit_vx[0], self.cfg.commands.ranges.limit_vy[0], self.cfg.commands.ranges.limit_vyaw[0], self.cfg.commands.ranges.limit_pitch[0]], dtype=torch.float, device=self.device, requires_grad=False)
         self.nav_clip_max = torch.tensor([self.cfg.commands.ranges.limit_vx[1], self.cfg.commands.ranges.limit_vy[1], self.cfg.commands.ranges.limit_vyaw[1], self.cfg.commands.ranges.limit_pitch[1]], dtype=torch.float, device=self.device, requires_grad=False)
 
-        self.base_euler = torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device, requires_grad=False)
+        self.euler_rpy = torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device, requires_grad=False)
+        self.base_lin_vel_pred = torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device, requires_grad=False)
         self.loco_obs_buf = torch.zeros(
                 self.num_envs, 47, device=self.device, dtype=torch.float)
         self.loco_obs_hist = torch.zeros(
                 self.num_envs, 10, 47, device=self.device, dtype=torch.float)  
 
+        self.camera_noise_vec = self._get_camera_noise_vec()
 
         self._load_loco_policy()
 
@@ -115,7 +117,7 @@ class LeggedRobotNav(LeggedRobot):
         self.commands = nav_actions # vx, vy, vyaw, pitch
         self._compute_loco_observations()
         actor_obs = self.loco_obs_hist.view(self.num_envs, -1)
-        loco_actions, loco_lin_vel = self.loco_body(actor_obs)
+        loco_actions, self.base_lin_vel_pred[:, :2] = self.loco_body(actor_obs)
             
         return loco_actions
     
@@ -125,8 +127,8 @@ class LeggedRobotNav(LeggedRobot):
         props = torch.cat((
                 self.base_ang_vel * self.obs_scales.ang_vel, # 3
                 self.projected_gravity, # 3
-                self.commands * self.commands_scale,
-                self.base_euler[:, 1:2] * self.obs_scales.pitch,  # dim 1
+                self.commands * self.commands_scale, # 4
+                self.euler_rpy[:, 1:2] * self.obs_scales.pitch,  # dim 1
                 self.reindex((self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos),
                 self.reindex(self.dof_vel * self.obs_scales.dof_vel),
                 self.last_dof_actions),dim=-1)
@@ -140,7 +142,7 @@ class LeggedRobotNav(LeggedRobot):
             ], dim=1)
         )  
 
-    
+
     def reset_idx(self, env_ids):
         """ origin: update terrain_cur(env_origin), cmd_curr, dofs, root_state(pos, vel), resample_cmds, fill extras
             new: remove cmd_curr, and some useless vars, update only when time out
@@ -241,9 +243,9 @@ class LeggedRobotNav(LeggedRobot):
         self.base_ang_vel[:] = quat_rotate_inverse(self.base_quat, self.root_states[:, 10:13])
         self.projected_gravity[:] = quat_rotate_inverse(self.base_quat, self.gravity_vec)
         roll, pitch, yaw = get_euler_xyz(self.base_quat)
-        self.base_euler[:, 0] = wrap_to_pi(roll)
-        self.base_euler[:, 1] = wrap_to_pi(pitch)
-        self.base_euler[:, 2] = wrap_to_pi(yaw)
+        self.euler_rpy[:, 0] = wrap_to_pi(roll)
+        self.euler_rpy[:, 1] = wrap_to_pi(pitch)
+        self.euler_rpy[:, 2] = wrap_to_pi(yaw)
 
         self._post_physics_step_callback() # [new] update nav_commands
 
@@ -252,7 +254,7 @@ class LeggedRobotNav(LeggedRobot):
         self.compute_reward() # [new] add goal-reaching reward
         env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
         self.reset_idx(env_ids) # [new] terrain_cur(env_origin), reset robot, resample_cmds
-        self.update_first_image()
+        self.update_image(env_ids=0) # update env0 image for debug viz, instead of all envs
         self.compute_observations() # [new] update nav_commands for nav policy
 
         self.last_actions[:] = self.actions[:]
@@ -276,7 +278,6 @@ class LeggedRobotNav(LeggedRobot):
             new: update nav_commands every step
         """
         env_ids = (self.episode_length_buf % int(self.cfg.commands.resampling_time / self.dt)==0).nonzero(as_tuple=False).flatten()
-        # self._resample_commands(env_ids, on_the_way=True)
 
         # pos in world -> pos in robot
         pos_diff = self.position_targets - self.root_states[:, 0:3]
@@ -296,19 +297,7 @@ class LeggedRobotNav(LeggedRobot):
 
         # self.nav_commands = cart2polar(goal_base[:, :2])  # theta, rho
         env_ids = (self.episode_length_buf % int(self.cfg.commands.delay_time / self.dt)==0).nonzero(as_tuple=False).flatten()
-        self.nav_commands[env_ids] = torch.cat([
-            self.P_image[env_ids],
-            self.depth[env_ids].unsqueeze(1)
-        ], dim=-1)  # (img_x, img_y, distance)
-
-        self.nav_commands_buffer[env_ids] = torch.where(
-            (self.episode_length_buf[env_ids] <= 1)[:, None, None],
-            torch.stack([self.nav_commands[env_ids]] * self.nav_commands_buffer[env_ids].shape[1], dim=1),
-            torch.cat([
-                self.nav_commands_buffer[env_ids, 1:],
-                self.nav_commands[env_ids].unsqueeze(1)
-            ], dim=1)
-        )  
+        self.get_nav_commands(env_ids)
 
         self.nav_actions_buffer = torch.where(
             (self.episode_length_buf <= 1)[:, None, None],
@@ -318,6 +307,9 @@ class LeggedRobotNav(LeggedRobot):
                 self.nav_actions.unsqueeze(1)
             ], dim=1)
         ) 
+
+        self.timer = (self.episode_length_buf / self.max_episode_length).unsqueeze(-1)
+
 
     def _resample_commands(self, env_ids, on_the_way=False):
         """ Only resample in reset (time out)
@@ -333,23 +325,100 @@ class LeggedRobotNav(LeggedRobot):
                 self.position_targets[env_ids, 2:3] = torch.clip(self.position_targets[env_ids, 2:3], 0.0, 0.2)
                 
             else:
-                _target_x = torch_rand_float(0.3, 5.0, (len(env_ids), 1), device=self.device)
-                _target_y = torch_rand_float(-2.0, 2.0, (len(env_ids), 1), device=self.device)
+                _target_x = torch_rand_float(1.5, 4.0, (len(env_ids), 1), device=self.device)
+                _target_y = torch_rand_float(-2.5, 2.5, (len(env_ids), 1), device=self.device)
                 _target_z = torch_rand_float(-0.0, 0.2, (len(env_ids), 1), device=self.device) # simulate object on the ground
                 self.position_targets[env_ids, 0:1] = self.env_origins[env_ids, 0:1] + _target_x * enbale_rand
                 self.position_targets[env_ids, 1:2] = self.env_origins[env_ids, 1:2] + _target_y * enbale_rand
                 self.position_targets[env_ids, 2:3] = self.env_origins[env_ids, 2:3] + _target_z * enbale_rand
 
+    def get_nav_commands(self, env_ids):
+        """ Resample navigation commands when camera message is ready (simulate real delay).
+        """
+
+        timeout = (self.episode_length_buf % int(self.cfg.commands.delay_time / self.dt)==0)
+        timeout_no_missing = (~self.out_of_view) & timeout
+        timeout_no_missing_env_ids = timeout_no_missing.nonzero(as_tuple=False).flatten()
+
+        self.nav_commands[env_ids] = self.P_image[env_ids]
+
+        # self.nav_commands[env_ids] = torch.cat([
+        #     self.P_image[env_ids],
+        #     self.depth[env_ids].unsqueeze(1)
+        # ], dim=-1)  # (img_x, img_y, distance)
+
+        # add noise if needed
+        if self.add_camera_noise:
+            self.nav_commands[timeout_no_missing_env_ids] += (2 * torch.rand_like(self.nav_commands[timeout_no_missing_env_ids]) - 1) * self.camera_noise_vec
+
+        self.nav_commands_buffer[env_ids] = torch.where(
+            (self.episode_length_buf[env_ids] <= 1)[:, None, None],
+            torch.stack([self.nav_commands[env_ids]] * self.nav_commands_buffer[env_ids].shape[1], dim=1),
+            torch.cat([
+                self.nav_commands_buffer[env_ids, 1:],
+                self.nav_commands[env_ids].unsqueeze(1)
+            ], dim=1)
+        )  
+    
+    def _get_camera_noise_vec(self):
+        noise_vec = torch.zeros_like(self.nav_commands[0])
+        noise_scales = self.cfg.noise.noise_scales
+        self.add_camera_noise = self.cfg.noise.add_camera_noise
+        noise_vec[0] = noise_scales.P_img_u
+        noise_vec[1] = noise_scales.P_img_v
+        # noise_vec[2] = noise_scales.P_img_depth
+        return noise_vec
+
+    def _get_noise_scale_vec(self, cfg):
+        """ Sets a vector used to scale the noise added to the observations.
+            [NOTE]: Must be adapted when changing the observations structure
+
+        Args:
+            cfg (Dict): Environment config file
+
+        Returns:
+            [torch.Tensor]: Vector of scales used to multiply a uniform distribution in [-1, 1]
+        """
+        noise_vec = torch.zeros_like(self.obs_buf[0])
+        self.add_noise = self.cfg.noise.add_noise
+        noise_scales = self.cfg.noise.noise_scales
+        noise_level = self.cfg.noise.noise_level
+        start = 0
+        end = self.base_lin_vel.shape[1]
+        noise_vec[start:end] = 0. # base_lin_vel_pred (get from loco policy, no noise)
+        start = end
+        end = self.base_ang_vel.shape[1]
+        noise_vec[start:end] = noise_scales.ang_vel * noise_level * self.obs_scales.ang_vel
+        start = end
+        end = start + self.projected_gravity.shape[1]
+        noise_vec[start:end] = noise_scales.gravity * noise_level * 1.0
+        start = end
+        end = start + self.nav_commands.shape[1]
+        noise_vec[start:end] = 0. # commands
+        start = end
+        end = start + 1
+        noise_vec[start:end] = 0. # timer
+        start = end
+        end = start + self.nav_actions.shape[1]
+        noise_vec[start:end] = 0. # previous actions
+        return noise_vec
+
     def compute_observations(self):
         """ Computes observations for updating nav agent
         """
+
         obs_buf = torch.cat([
-            self.base_lin_vel * self.obs_scales.lin_vel,
+            self.base_lin_vel_pred * self.obs_scales.lin_vel,
             self.base_ang_vel * self.obs_scales.ang_vel,
             self.projected_gravity,
             self.nav_commands, 
+            self.timer,
             self.nav_actions
             ], dim=-1)
+
+        # add noise if needed
+        if self.add_noise:
+            self.obs_buf += (2 * torch.rand_like(self.obs_buf) - 1) * self.noise_scale_vec
 
         self.obs_hist_buffer = torch.where(
             (self.episode_length_buf <= 1)[:, None, None],
@@ -360,14 +429,17 @@ class LeggedRobotNav(LeggedRobot):
             ], dim=1)
         )
         
-        self.obs_buf = self.obs_hist_buffer.view(self.num_envs, -1)
+        self.obs_buf = torch.cat([
+            self.goal_base, self.obs_hist_buffer.view(self.num_envs, -1)
+            ], dim=-1)
+
 
     def _draw_debug_vis(self):
         """ Draw position targets
         """
         self.gym.clear_lines(self.viewer)
         self.gym.refresh_rigid_body_state_tensor(self.sim)
-        sphere_blue = gymutil.WireframeSphereGeometry(0.10, 8, 8, None, color=(0, 0, 1))
+        sphere_blue = gymutil.WireframeSphereGeometry(0.05, 8, 8, None, color=(0, 0, 1))
         for i in range(self.num_envs):
             x = self.position_targets[i, 0]
             y = self.position_targets[i, 1]
@@ -376,9 +448,10 @@ class LeggedRobotNav(LeggedRobot):
             gymutil.draw_lines(sphere_blue, self.gym, self.viewer, self.envs[i], sphere_pose) 
 
         self.camera_sensor.visualize_img_coords(P_base=self.goal_base[0], P_camera=self.P_camera[0], P_image=self.P_image[0])
-        # if hasattr(self, 'image'):
-            # image = self.image.detach().cpu().numpy()
-            # self.camera_sensor.visualize_img(image)
+
+        if hasattr(self, 'image'):
+            image = self.image.detach().cpu().numpy()
+            self.camera_sensor.visualize_img(image)
             # self._draw_camera_position()
 
     def _draw_camera_position(self):
@@ -402,8 +475,8 @@ class LeggedRobotNav(LeggedRobot):
             return
         camera_props = gymapi.CameraProperties()
         camera_props.enable_tensors = True
-        camera_props.width = self.cfg.camera_sensor.img_width
-        camera_props.height = self.cfg.camera_sensor.img_height
+        camera_props.width = self.cfg.camera_sensor.intrinsics.img_width
+        camera_props.height = self.cfg.camera_sensor.intrinsics.img_height
         camera_props.horizontal_fov = self.cfg.camera_sensor.intrinsics.horizontal_fov
         camera_handle = self.gym.create_camera_sensor(
             env_handle, camera_props)
@@ -412,14 +485,14 @@ class LeggedRobotNav(LeggedRobot):
         local_transform = gymapi.Transform()
         local_transform.p = gymapi.Vec3(*self.camera_position)
         local_transform.r = gymapi.Quat.from_euler_zyx(
-            np.radians(self.camera_angle[0]), np.radians(self.camera_angle[1]), np.radians(self.camera_angle[2]))
+            np.radians(-self.camera_angle[0]), -np.radians(self.camera_angle[1]), -np.radians(self.camera_angle[2]))
 
         self.gym.attach_camera_to_body(
             camera_handle, env_handle, root_handle, local_transform, gymapi.FOLLOW_TRANSFORM)
 
         self.cam_handles.append(camera_handle)
     
-    def update_first_image(self):
+    def update_image(self, env_ids=0):
         if not self.enable_camera:
             return
         self.gym.step_graphics(self.sim)  # required to render in headless mode
@@ -427,8 +500,8 @@ class LeggedRobotNav(LeggedRobot):
         self.gym.start_access_image_tensors(self.sim)
 
         image_ = self.gym.get_camera_image_gpu_tensor(self.sim,
-                                                        self.envs[0],
-                                                        self.cam_handles[0],
+                                                        self.envs[env_ids],
+                                                        self.cam_handles[env_ids],
                                                         gymapi.IMAGE_COLOR)
         self.image = gymtorch.wrap_tensor(image_)
         self.gym.end_access_image_tensors(self.sim)
@@ -444,7 +517,6 @@ class LeggedRobotNav(LeggedRobot):
         return (1. /(1. + 10*torch.square(actions_norm))) * (self.reach_goal)
     
     def _reward_orientation_y(self):
-        # print(f"projected_gravity: {self.projected_gravity}")
         return torch.square(self.projected_gravity[:, 1])
     
     def _reward_nav_action_rate(self):
@@ -461,7 +533,7 @@ class LeggedRobotNav(LeggedRobot):
         dir_cos = forward[:,0] * xy_dif[:,0] + forward[:,1] * xy_dif[:,1]
         # theta_error = torch.acos(dir_cos)
         theta_error = 1.0 - dir_cos
-        return torch.exp(-theta_error / 0.01) * (dir_cos > 0.99) + 5.0 * self.reach_goal
+        return torch.exp(-theta_error / 0.001) * (dir_cos > 0.99) + 5.0 * self.reach_goal
         # return torch.exp(-theta_error / 0.01) * (~self.reach_goal)  + 2.0 * self.reach_goal
     
     def _reward_view_missing(self):
@@ -481,8 +553,9 @@ class LeggedRobotNav(LeggedRobot):
     def _reward_tracking_horizontal_distance(self):
         """ Reward for tracking the horizontal distance to the goal position
         """
+        tight_area = self.distance < 1.0
         dy_error = torch.square(self.goal_base[:, 1])
-        return torch.exp(-dy_error / 0.01)
+        return torch.exp(-dy_error / 0.001) * tight_area
 
     def _reward_horizontal_distance_error(self):
         # Penalize large horizontal distance error
@@ -493,11 +566,13 @@ class LeggedRobotNav(LeggedRobot):
     
     def _reward_keep_forward(self):
         # robot keep move at speed 
-        target_vx = 0.35 # m/s
+        target_vx = 0.5 # m/s
         lin_vel_error = torch.square(target_vx - self.base_lin_vel[:, 0])
         return torch.exp(-lin_vel_error/self.cfg.rewards.tracking_sigma)
 
     def _reward_reach_grasp_area(self):
         target_grasp_width = 0.1
         grasp_area = (torch.abs(self.goal_base[:, 1]) < (target_grasp_width/2.0))
-        return self.reach_goal * grasp_area.float()
+        # reach_grasp_distance = self.distance < 0.25
+        reach_grasp_distance =  self.reach_goal
+        return reach_grasp_distance * grasp_area.float()

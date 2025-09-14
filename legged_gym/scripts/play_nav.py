@@ -67,10 +67,12 @@ def play(args):
     env_cfg.terrain.num_rows = 1
     env_cfg.terrain.num_cols = 1
     env_cfg.terrain.curriculum = False
-    env_cfg.noise.add_noise = False
+    env_cfg.noise.add_noise = True
     env_cfg.domain_rand.randomize_friction = False
     env_cfg.domain_rand.push_robots = False
     env_cfg.camera_sensor.fix_extrinsics = True
+    env_cfg.camera_sensor.fix_intrinsics = True
+    env_cfg.camera_sensor.fix_img_shape = True
     env_cfg.camera_sensor.enable_camera = True
 
     # prepare environment
@@ -84,13 +86,11 @@ def play(args):
                                                           train_cfg=train_cfg)
     policy = ppo_runner.get_inference_policy(device=env.device)
 
-    # export policy as a jit module (used to run it from C++)
-    if EXPORT_POLICY:
-        path = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs',
-                            train_cfg.runner.experiment_name, 'exported',
-                            'policies')
-        export_policy_as_jit(ppo_runner.alg.actor_critic, path)
-        print('Exported policy as jit script to: ', path)
+    if EXPORT_ONNX:
+        # onnx_dir = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs',
+        #                     train_cfg.runner.experiment_name, 'exported')
+        onnx_dir = '/home/robot/Data/onboard_data/onnx_models/homi/nav_model'
+        ppo_runner.alg.actor_critic.export_onnx_model(onnx_dir=onnx_dir)
 
     camera_position = np.array(env_cfg.viewer.pos, dtype=np.float64)
     camera_direction = np.array(env_cfg.viewer.lookat) - np.array(
@@ -105,24 +105,29 @@ def play(args):
         dy = env.goal_base[0, 1].item()
         dz = env.goal_base[0, 2].item()
 
-        cx = actions[0, 0].item()
-        cy = actions[0, 1].item()
-        cyaw = actions[0, 2].item()
-        cpitch = actions[0, 3].item()
+        cx = env.nav_actions[0, 0].item()
+        cy = env.nav_actions[0, 1].item()
+        cyaw = env.nav_actions[0, 2].item()
+        cpitch = env.nav_actions[0, 3].item()
 
+
+        u = env.nav_commands[0, 0].item()
+        v = env.nav_commands[0, 1].item()
+        # depth = env.nav_commands[0, 2].item()
 
         vx = env.base_lin_vel[0, 0]
         vy = env.base_lin_vel[0, 1]
         vyaw = env.base_ang_vel[0, 2]
-        pitch = env.base_euler[0, 1]
+        pitch = env.euler_rpy[0, 1]
 
 
-        # print(f"P_base: ({dx:.2f},{dy:.2f},{dz:.2f})")
+
+        # print(f"P_img: ({u:.2f}, {v:.2f}, {depth:.2f})")
         # print(f"Action: ({cx:.2f}, {cy:.2f}, {cyaw:.2f}, {cpitch:.2f})")
         # print(f"Base: ({vx:.2f}, {vy:.2f}, {vyaw:.2f}, {pitch:.2f})")
         # print(f"Distance: ({env.distance[0]:.2f})")
         
 if __name__ == '__main__':
-    EXPORT_POLICY = True
+    EXPORT_ONNX = True
     args = get_args(args)
     play(args)

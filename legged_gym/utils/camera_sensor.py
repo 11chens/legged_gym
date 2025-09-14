@@ -2,46 +2,92 @@ import torch
 from scipy.spatial.transform import Rotation as R_np
 import numpy as np
 import cv2
+from isaacgym.torch_utils import *
 
 class camera_sensor:
+    enable_camera = False  # if True, the camera sensor is enabled, otherwise it is disabled
     fix_extrinsics = False  # if True, the camera extrinsics are fixed, otherwise they are randomized
-    fix_intrinsics = True  # if True, the camera intrinsics are fixed, otherwise they are randomized
-    img_width = 1280
-    img_height = 720
+    fix_intrinsics = False  # if True, the camera intrinsics are fixed, otherwise they are randomized
+    fix_img_shape = False  # if True, the image shape is fixed, otherwise it is randomized
+
     class intrinsics: # Intrinsics parameters
         # Zed mini, HD720 mode
-        horizontal_fov = 82 
+        img_width = 1280
+        img_height = 720
+        horizontal_fov = 82.33
         fx = 731.995849609375
         fy = 731.995849609375
         cx = 620.0855102539062
         cy = 362.5731201171875
 
-    class extrinsics: # Extrinsics parameters
-        translation = [0.35, 0.0, 0.0] # forward, left, upper
-        angles = [0.0, 0.0, 0.0] # yaw, pitch, roll
+        # Zed mini, VGA mode
+        img_width = 672
+        img_height = 376
+        horizontal_fov = 85.0
+        fx = 367.0 # fx = img_width / (2 * tan(horizontal_fov/2 * pi/180))
+        fy = 367.0 # fy = fx
+        cx = 336.0 # cx = img_width / 2
+        cy = 188.0 # cy = img_height / 2
 
+        horizontal_fov_range = [60.0, 100.0] # [degree]
+        img_height_range = [360, 720] # [pixel]
+        img_width_range = [640, 1280] # [pixel]
+
+
+    class extrinsics: # Extrinsics parameters
+        translation = [0.4, 0.0, 0.0] # forward, left, upper
+        angles = [0.0, 15.0, 0.0] # yaw, pitch, roll
+
+        yaw_range = [-3.0, 3.0]   # [degree]
+        pitch_range = [-30.0, 30.0] # [degree]
+        roll_range = [-3.0, 3.0]  # [degree]
+        dx_range = [0.3, 0.6]   # [m]
+        dy_range = [-0.025, 0.025]   # [m]
+        dz_range = [-0.2, 0.2]   # [m]
 
 class CameraSensor:
     """
-    用于批量处理的相机模型类，支持基座坐标系、相机坐标系和图像坐标系之间的相互转换。
-
-    坐标系说明：
-    - 基座坐标系（Base）：机器人参考坐标系，X 轴指向机器人前进方向，Y 轴指向机器人左侧，Z 轴指向机器人上方。
-    - 相机坐标系（Camera）：相机光学坐标系，Z 轴指向相机前方（朝向拍摄场景），X 轴指向图像宽度方向的右侧，Y 轴指向图像高度方向的下侧。
-    - 图像坐标系（Image）：图像平面的 2D 坐标系，以左上角为原点，u 方向对应图像宽度，v 方向对应图像高度。
-
-    本类通过预设或随机生成的内参和外参，提供基座→相机、相机→图像、图像→相机、相机→基座等转换函数，方便进行前向和反向几何变换。
+    A class to simulate a camera sensor in a 3D environment, handling camera intrinsics and extrinsics.
+    The camera can transform points from the base coordinate system to the camera coordinate system,
+    and then project them onto the image plane, providing normalized pixel coordinates.
+    Attributes:
+        batch_size (int): Number of camera instances to simulate in parallel.
+        cfg (object): Configuration object containing camera parameters.
+        device (str): Device to run the computations on ('cpu' or 'cuda').
+        fix_extrinsics (bool): If True, camera extrinsics are fixed; otherwise, they are randomized.
+        fix_intrinsics (bool): If True, camera intrinsics are fixed; otherwise, they are randomized.
+        fix_img_shape (bool): If True, image shape is fixed; otherwise, it is randomized.
+        intrinsics_cfg (object): Configuration for camera intrinsics.
+        extrinsics_cfg (object): Configuration for camera extrinsics.
+        img_height (int or Tensor): Image height in pixels. If randomized, it's a Tensor of shape [batch_size, 1].
+        img_width (int or Tensor): Image width in pixels. If randomized, it's a Tensor of shape [batch_size, 1].
+        fx (Tensor): Focal length in x direction (in pixels), shape [batch_size, 1] or scalar if fixed.
+        fy (Tensor): Focal length in y direction (in pixels), shape [batch_size, 1] or scalar if fixed.
+        cx (Tensor): Principal point x-coordinate (in pixels), shape [batch_size, 1] or scalar if fixed.
+        cy (Tensor): Principal point y-coordinate (in pixels), shape [batch_size, 1] or scalar if fixed.
+        R (Tensor): Rotation matrix from base frame to camera frame, shape [batch_size, 3, 3].
+        T (Tensor): Translation vector of camera optical center in base frame, shape [batch_size, 3].
     """
     def __init__(self, batch_size, cfg=None, device='cpu'):
         self.batch_size = batch_size
         self.cfg = cfg
         self.fix_extrinsics = cfg.fix_extrinsics
         self.fix_intrinsics = cfg.fix_intrinsics
+        self.fix_img_shape = cfg.fix_img_shape
         self.intrinsics_cfg = cfg.intrinsics
         self.extrinsics_cfg = cfg.extrinsics
-        self.img_width = self.cfg.img_width
-        self.img_height = self.cfg.img_height
         self.device = device
+
+        if self.fix_img_shape:
+            self.img_height = cfg.intrinsics.img_height
+            self.img_width = cfg.intrinsics.img_width
+        else:
+            self.img_height_min = cfg.intrinsics.img_height_range[0]
+            self.img_height_max = cfg.intrinsics.img_height_range[1]
+            self.img_height = torch.randint(self.img_height_min, self.img_height_max, (self.batch_size, 1), device=self.device)
+            self.img_width_min = cfg.intrinsics.img_width_range[0]
+            self.img_width_max = cfg.intrinsics.img_width_range[1]
+            self.img_width = torch.randint(self.img_width_min, self.img_width_max, (self.batch_size, 1), device=self.device)
 
         if self.fix_intrinsics:
             self._init_fixed_intrinsics()
@@ -53,13 +99,13 @@ class CameraSensor:
         else:
             self._init_random_extrinsics()
 
+
     def _init_fixed_intrinsics(self):
         """
-        初始化相机内参。这里默认使用固定的焦距和主点，
-
-        内参包括：
-        - fx, fy：焦距（单位：像素），控制 x 和 y 方向的放大比例。
-        - cx, cy：主点（单位：像素），通常位于图像中心。
+        Initialize fixed camera intrinsics.
+        The intrinsics include:
+        - fx, fy: Focal lengths (in pixels), controlling the scaling in the x and y directions.
+        - cx, cy: Principal points (in pixels), usually located at the center of the image.
         """
         self.fx = self.intrinsics_cfg.fx
         self.fy = self.intrinsics_cfg.fy
@@ -68,34 +114,39 @@ class CameraSensor:
 
     def _init_random_intrinsics(self):
         """
-        初始化相机内参。
-
-        内参包括：
-        - fx, fy：焦距（单位：像素），控制 x 和 y 方向的放大比例。
-        - cx, cy：主点（单位：像素），通常位于图像中心。
+        Initialize random camera intrinsics.
+        The intrinsics include:
+        - fx, fy: Focal lengths (in pixels), controlling the scaling in the x and y directions.
+        - cx, cy: Principal points (in pixels), usually located at the center of the image.
+        Here, we randomly sample the horizontal field of view (FOV) within a specified range, and compute fx, fy, cx, cy accordingly.
+        The image width and height are also randomly sampled within specified ranges.
         """
-        # 以下是随机初始化内参的示例，随机范围可根据实际情况调整：
-        self.fx = torch.rand(self.batch_size, device=self.device) * 100 + 80   # 随机生成 [80,180] 范围的 fx
-        self.fy = torch.rand(self.batch_size, device=self.device) * 100 + 80   # 随机生成 [80,180] 范围的 fy
-        self.cx = torch.full((self.batch_size,), self.img_width / 2, device=self.device)  # 主点 cx 位于图像宽度中点
-        self.cy = torch.full((self.batch_size,), self.img_height / 2, device=self.device) # 主点 cy 位于图像高度中点
+        self.horizontal_fov_min = self.intrinsics_cfg.horizontal_fov_range[0]
+        self.horizontal_fov_max = self.intrinsics_cfg.horizontal_fov_range[1]
+        self.horizontal_fov = torch_rand_float(self.horizontal_fov_min, self.horizontal_fov_max, (self.batch_size, 1), device=self.device) # [60, 100]
+        self.fx = self.img_width / (2 * torch.tan(self.horizontal_fov / 2 * np.pi / 180))
+        self.fy = self.fx
+        self.cx = self.img_width / 2
+        self.cy = self.img_height / 2
 
     def _init_fixed_extrinsics(self):
-        # TODO: visulize cam pos, isaacgym img, rays: FOV, HOV
-        # 随机采样欧拉角（单位：度）
+        """
+        Initialize camera extrinsics (pose).
+        The extrinsics consist of a rotation matrix R and a translation vector T:
+        - Rotation matrix R: Describes the rotation from the base frame to the camera frame. Here, yaw (yaw), pitch (pitch), and roll (roll) angles are randomly sampled to generate R.
+          The rotation matrix uses ZYX Euler angles in order, and is further multiplied by r_align to convert from the base frame (X forward, Y left, Z up) to the camera frame (X right, Y down, Z forward).
+        - Translation vector T: Describes the camera optical center position in the base frame, randomly generated as:
+        """
         yaw = torch.ones(self.batch_size, 1, device=self.device) * self.extrinsics_cfg.angles[0]
         pitch = torch.ones(self.batch_size, 1, device=self.device) * self.extrinsics_cfg.angles[1]
         roll = torch.ones(self.batch_size, 1, device=self.device) * self.extrinsics_cfg.angles[2]
         self.angles = torch.cat([yaw, pitch, roll], dim=-1)
         self.R = torch.empty((self.batch_size, 3, 3), device=self.device)
         for i in range(self.batch_size):
-            # 使用 SciPy 生成欧拉角对应的旋转矩阵
             rmat = R_np.from_euler('ZYX', self.angles[i].cpu().numpy(), degrees=True).as_matrix()
-            # 将基座坐标系与相机坐标系对齐的固定矩阵
             r_align = torch.tensor([[0, -1, 0], [0, 0, -1], [1, 0, 0]], dtype=torch.float32)
             self.R[i] = r_align @ torch.tensor(rmat, dtype=torch.float32)
 
-        # 随机采样相机光心在基座坐标系中的位置 T = [dx, dy, dz]
         dx = torch.ones(self.batch_size, 1, device=self.device) * self.extrinsics_cfg.translation[0]
         dy = torch.ones(self.batch_size, 1, device=self.device) * self.extrinsics_cfg.translation[1]
         dz = torch.ones(self.batch_size, 1, device=self.device) * self.extrinsics_cfg.translation[2]
@@ -103,91 +154,89 @@ class CameraSensor:
 
     def _init_random_extrinsics(self):
         """
-        初始化相机外参（位姿）。
-
-        外参由旋转矩阵 R 和位移向量 T 组成：
-        - 旋转矩阵 R：描述基座坐标系到相机坐标系的旋转，这里通过随机采样 yaw（偏航）、pitch（俯仰）、roll（翻滚）角生成。
-          yaw ∈ [-10°, 10°]，pitch ∈ [-30°, 30°]，roll ∈ [-10°, 10°]。
-          旋转矩阵按顺序采用 ZYX 欧拉角，并额外与 r_align 相乘以将基座坐标系 (X 前, Y 左, Z 上) 转换为相机坐标系 (X 右, Y 下, Z 前)。
-        - 位移向量 T：描述相机光心在基座坐标系中的位置，这里随机生成：
-          dx ∈ [0.3, 0.6]，dy ∈ [-0.3, 0.3]，dz ∈ [-0.3, 0.3]。
+        Initialize camera extrinsics (pose).
+        The extrinsics consist of a rotation matrix R and a translation vector T:
+        - Rotation matrix R: Describes the rotation from the base frame to the camera frame. Here, yaw (yaw), pitch (pitch), and roll (roll) angles are randomly sampled to generate R.
+          The rotation matrix uses ZYX Euler angles in order, and is further multiplied by r_align to convert from the base frame (X forward, Y left, Z up) to the camera frame (X right, Y down, Z forward).
+        - Translation vector T: Describes the camera optical center position in the base frame, randomly generated as:
         """
-        # 随机采样欧拉角（单位：度）
-        yaw = torch.rand(self.batch_size, 1, device=self.device) * 20 - 10   # 偏航角范围 [-10°, 10°]
-        pitch = torch.rand(self.batch_size, 1, device=self.device) * 40 - 20 # 俯仰角范围 [-20, 20]
-        roll = torch.rand(self.batch_size, 1, device=self.device) * 20 - 10  # 翻滚角范围 [-10°, 10°]
+        self.yaw_min = self.extrinsics_cfg.yaw_range[0]
+        self.yaw_max = self.extrinsics_cfg.yaw_range[1]
+        yaw = torch_rand_float(self.yaw_min, self.yaw_max, (self.batch_size, 1), device=self.device)
+        self.pitch_min = self.extrinsics_cfg.pitch_range[0]
+        self.pitch_max = self.extrinsics_cfg.pitch_range[1]
+        pitch = torch_rand_float(self.pitch_min, self.pitch_max, (self.batch_size, 1), device=self.device) 
+        self.roll_min = self.extrinsics_cfg.roll_range[0]
+        self.roll_max = self.extrinsics_cfg.roll_range[1]
+        roll = torch_rand_float(self.roll_min, self.roll_max, (self.batch_size, 1), device=self.device)  
         self.angles = torch.cat([yaw, pitch, roll], dim=-1)
         self.R = torch.empty((self.batch_size, 3, 3), device=self.device)
         for i in range(self.batch_size):
-            # 使用 SciPy 生成欧拉角对应的旋转矩阵
             rmat = R_np.from_euler('ZYX', self.angles[i].cpu().numpy(), degrees=True).as_matrix()
-            # 将基座坐标系与相机坐标系对齐的固定矩阵
             r_align = torch.tensor([[0, -1, 0], [0, 0, -1], [1, 0, 0]], dtype=torch.float32)
             self.R[i] = r_align @ torch.tensor(rmat, dtype=torch.float32)
 
-        # 随机采样相机光心在基座坐标系中的位置 T = [dx, dy, dz]
-        dx = torch.rand(self.batch_size, 1, device=self.device) * 0.3 + 0.3   # x 方向位移范围 [0.3, 0.6]
-        dy = torch.rand(self.batch_size, 1, device=self.device) * 0.2 - 0.1   # y 方向位移范围 [-0.1, 0.1]
-        dz = torch.rand(self.batch_size, 1, device=self.device) * 0.4 - 0.2   # z 方向位移范围 [-0.2, 0.2]
+        self.dx_min = self.extrinsics_cfg.dx_range[0]
+        self.dx_max = self.extrinsics_cfg.dx_range[1]
+        dx = torch_rand_float(self.dx_min, self.dx_max, (self.batch_size, 1), device=self.device)
+        self.dy_min = self.extrinsics_cfg.dy_range[0]
+        self.dy_max = self.extrinsics_cfg.dy_range[1]
+        dy = torch_rand_float(self.dy_min, self.dy_max, (self.batch_size, 1), device=self.device)
+        self.dz_min = self.extrinsics_cfg.dz_range[0]
+        self.dz_max = self.extrinsics_cfg.dz_range[1]
+        dz = torch_rand_float(self.dz_min, self.dz_max, (self.batch_size, 1), device=self.device)
         self.T = torch.cat([dx, dy, dz], dim=-1)
 
 
     def base_to_camera(self, P_base: torch.Tensor) -> torch.Tensor:
         """
-        将基座坐标系中的点转换到相机坐标系。
+        English:
+        Transform points from the base coordinate system to the camera coordinate system.
 
-        参数：
-            P_base (Tensor): 形状为 [B, 3] 的基座坐标点集合，其中 B 为批量大小。
-
-        返回：
-            Tensor: 形状为 [B, 3] 的相机坐标点集合。
-
-        公式：
-            P_cam = R * (P_base - T)
-        其中 R 为旋转矩阵，T 为相机光心在基座坐标系中的位置。
         """
-        # 计算点相对于相机光心的偏移量
+        # Compute the offset of the point relative to the camera optical center
         delta = P_base - self.T  # [B, 3]
-        # 施加旋转，得到相机坐标系下的点
+        # Apply rotation to get the point in the camera coordinate system
         P_camera = torch.bmm(self.R, delta.unsqueeze(-1)).squeeze(-1)  # [B, 3]
         return P_camera
 
     def camera_to_image(self, P_camera: torch.Tensor) -> torch.Tensor:
         """
-        将相机坐标系中的点投影到图像平面，并得到归一化的像素坐标。
+        Project points from the camera coordinate system to the image plane, obtaining normalized pixel coordinates.
 
-        参数：
-            P_camera (Tensor): 形状为 [B, 3] 的相机坐标点集合。
+        Args:
+            P_camera (Tensor): A collection of camera coordinate points with shape [B, 3].
 
-        返回：
-            Tensor: 形状为 [B, 2] 的归一化图像坐标，其中每个坐标范围在 [0,1]。当点在视野外或 Z<=0 时，对应位置设为 -1。
+        Returns:
+            Tensor: A collection of normalized image coordinates with shape [B, 2], where each coordinate is in the range [0, 1]. If a point is outside the field of view or Z <= 0, the corresponding position is set to -1.
         """
-        # 拆分相机坐标 X、Y、Z 分量
+        # Split camera coordinates into X, Y, Z components
         X, Y, Z = P_camera[:, 0:1], P_camera[:, 1:2], P_camera[:, 2:3]
-        # 根据针孔成像模型计算像素坐标
+        # X.shape: [B, 1], Y.shape: [B, 1], Z.shape: [B, 1]
+        # self.fx.shape: [B, 1] or scalar
         u = self.fx * X / Z + self.cx
         v = self.fy * Y / Z + self.cy
-        # 归一化到 [0, 1] 范围
+        # Normalize to [0, 1] range
         u_norm = u / self.img_width
         v_norm = v / self.img_height
-
+        # coords.shape: [B, 2]
         coords = torch.cat([u_norm, v_norm], dim=-1)
-        # 判断是否在视野内以及深度是否为正
+        # Check if the points are within the field of view and if depth is positive
         visible = (Z > 0) & (u_norm >= 0) & (u_norm <= 1) & (v_norm >= 0) & (v_norm <= 1)
         visible = visible.squeeze()
-        # 对于视野外或在相机后方的点，将归一化坐标设为 -1
+        # For points outside the field of view or behind the camera, set normalized coordinates to -1
         coords[~visible] = -1.0
         return coords
 
     def transform(self, P_base: torch.Tensor):
         """
-        从基座坐标系到相机坐标系再到图像坐标系的完整变换。
+        Transform points from the base coordinate system to the camera coordinate system, and then project them onto the image plane.
 
-        参数：
-            P_base (Tensor): 形状为 [B, 3] 的基座坐标点集合。
+        Args:
+            P_base (Tensor): A collection of base coordinate points with shape [B, 3].
 
-        返回：
-            Tuple[Tensor, Tensor]: 第一个返回值为相机坐标系中的点 [B,3]，第二个为归一化图像坐标 [B,2]。
+        Returns:
+            Tuple[Tensor, Tensor]: The first return value is the points in the camera coordinate system [B, 3], and the second is the normalized image coordinates [B, 2].
         """
         P_camera = self.base_to_camera(P_base)
         P_image = self.camera_to_image(P_camera)
@@ -195,21 +244,20 @@ class CameraSensor:
 
     def image_to_camera(self, uv_norm: torch.Tensor, depth: torch.Tensor) -> torch.Tensor:
         """
-        将归一化的图像坐标和深度值反投影到相机坐标系。
+        Project normalized image coordinates and depth values back to the camera coordinate system.
 
-        参数：
-            uv_norm (Tensor): 形状为 [B, 2] 的归一化图像坐标，范围在 [0,1]。
-            depth (Tensor): 形状为 [B] 的深度值，即 Z 分量。
+        Args:
+            uv_norm (Tensor): A collection of normalized image coordinates with shape [B, 2], in the range [0, 1].
+            depth (Tensor): A collection of depth values with shape [B], representing the Z component.
 
-        返回：
-            Tensor: 形状为 [B, 3] 的相机坐标点集合。
+        Returns:
+            Tensor: A collection of camera coordinate points with shape [B, 3].
         """
         u, v = uv_norm[:, 0], uv_norm[:, 1]
-        # 将归一化坐标转换为像素坐标
+        # Convert normalized coordinates to pixel coordinates
         u_pix = u * self.img_width
         v_pix = v * self.img_height
 
-        # 根据反投影公式计算相机坐标
         x = (u_pix - self.cx) * depth / self.fx
         y = (v_pix - self.cy) * depth / self.fy
         z = depth
@@ -217,31 +265,25 @@ class CameraSensor:
 
     def camera_to_base(self, P_camera: torch.Tensor) -> torch.Tensor:
         """
-        将相机坐标系中的点转换回基座坐标系。
-
-        参数：
-            P_camera (Tensor): 形状为 [B, 3] 的相机坐标点集合。
-
-        返回：
-            Tensor: 形状为 [B, 3] 的基座坐标点集合。
-
-        公式：
-            P_base = R^T * P_camera + T
-        其中 R^T 为旋转矩阵的转置，T 为相机光心在基座坐标系中的位置。
+        Transform points from the camera coordinate system back to the base coordinate system.
+        Args:
+            P_camera (Tensor): A collection of camera coordinate points with shape [B, 3].
+        Returns:
+            Tensor: A collection of base coordinate points with shape [B, 3].
         """
-        # 先乘以旋转矩阵的转置进行逆旋转，再加上相机光心位置
+        # Apply the inverse rotation and translation to get the point in the base coordinate system
         return torch.bmm(self.R.transpose(1, 2), P_camera.unsqueeze(-1)).squeeze(-1) + self.T  # [B, 3]
 
     def inverse_transform(self, uv_norm: torch.Tensor, depth: torch.Tensor):
         """
-        从图像归一化坐标和深度值反推回相机坐标系和基座坐标系。
+        Project normalized image coordinates and depth values back to the camera coordinate system and base coordinate system.
 
-        参数：
-            uv_norm (Tensor): 形状为 [B, 2] 的归一化图像坐标。
-            depth (Tensor): 形状为 [B] 的深度值。
+        Args:
+            uv_norm (Tensor): A collection of normalized image coordinates with shape [B, 2], in the range [0, 1].
+            depth (Tensor): A collection of depth values with shape [B], representing the Z component.
 
-        返回：
-            Tuple[Tensor, Tensor]: 第一个返回值为相机坐标系中的点 [B,3]，第二个为基座坐标点 [B,3]。
+        Returns:
+            Tuple[Tensor, Tensor]: The first return value is the points in the camera coordinate system [B, 3], and the second is the base coordinate points [B, 3].
         """
         P_camera = self.image_to_camera(uv_norm, depth)
         P_base = self.camera_to_base(P_camera)
@@ -254,19 +296,20 @@ class CameraSensor:
 
     def visualize_img_coords(self, P_base, P_camera, P_image):
         """
-        在屏幕上可视化单个点在相机视图中的投影。
-        如果归一化图像坐标包含 -1，则说明点在视野外或位于相机后方，此时在图像中央显示提示信息；
-        否则绘制点的位置，并在图像上叠加显示基座坐标、相机坐标和归一化图像坐标。
+        Visualize the projection of a single point in the camera view on the screen.
+        If the normalized image coordinates contain -1, it indicates that the point is out of view or behind the camera,
+        and a message will be displayed in the center of the image;
+        otherwise, the position of the point will be drawn, and the base coordinates, camera coordinates, and normalized image coordinates will be overlaid on the image.
 
-        参数：
-            P_base: 长度为 3 的数组，表示基座坐标系中的点。
-            P_camera: 长度为 3 的数组，表示相机坐标系中的点。
-            P_image: 长度为 2 的数组，表示归一化图像坐标。
-            img_width: 图像宽度（像素）。
-            img_height: 图像高度（像素）。
+        Args:
+            P_base: A collection of base coordinate points with shape [B, 3].
+            P_camera: A collection of camera coordinate points with shape [B, 3].
+            P_image: A collection of normalized image coordinates with shape [B, 2].
+            img_width: The width of the image (in pixels).
+            img_height: The height of the image (in pixels).
 
-        返回：
-            bool: 如果按下 ESC 键，则返回 False，表示退出；否则返回 True。
+        Returns:
+            bool: If the ESC key is pressed, return False to indicate exit; otherwise, return True.
         """
         image = np.zeros((self.img_height, self.img_width, 3), dtype=np.uint8)
         
@@ -277,10 +320,8 @@ class CameraSensor:
             u_pixel = int(P_image[0] * self.img_width)
             v_pixel = int(P_image[1] * self.img_height)
             
-            # 绘制投影点
             cv2.circle(image, (u_pixel, v_pixel), 5, (0, 0, 255), -1)
             
-            # 叠加显示归一化图像坐标、基座坐标和相机坐标
             text = f"Normal P_img: ({P_image[0]:.3f}, {P_image[1]:.3f})"
             cv2.putText(image, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             
@@ -302,57 +343,52 @@ class CameraSensor:
 
 def verify_camera_transform(camera: CameraSensor, num_points: int = 10) -> float:
     """
-    随机生成基座坐标点，对相机坐标和图像坐标进行正向和逆向变换，验证转换的正确性。
-
-    参数：
-        camera (CameraSensor): 相机对象。
-        num_points (int): 测试的点的数量。
-
-    返回：
-        float: 所有测试点中的最大重建误差。
+    Verify the consistency of the camera transformation by randomly generating points in the base coordinate system,
+    transforming them to the camera coordinate system and image plane, and then inversely transforming them back
+    to the camera and base coordinate systems. The reconstruction error is computed to assess the accuracy of
+    the transformations.
     """
     np.random.seed(42)
     max_error = 0.0
 
     for _ in range(num_points):
-        # 随机生成基座坐标点
         dx = np.random.uniform(0.5, 6.0)
         dy = np.random.uniform(-2.0, 2.0)
         dz = np.random.uniform(-1.0, 2.0)
         P_base = np.array([[dx, dy, dz]])
         P_base_tensor = torch.from_numpy(P_base).to(dtype=torch.float32)
 
-        # 正向变换：基座 → 相机 → 图像
+        # English: Transform the point from the base coordinate system to the camera coordinate system and image plane
         P_camera, P_image = camera.transform(P_base_tensor)
         P_camera = P_camera[0]
         P_image = P_image[0]
 
-        # 如果投影点在视野外，则跳过
+        # If the projected point is out of view, skip it
         if (P_image == -1).any():
-            print(f"[跳过] 点 {P_base} 在视野外或相机后方")
+            print(f"[Skip] Point {P_base} is out of view or behind the camera")
             continue
 
         u_norm, v_norm = P_image
         depth = P_camera[2].unsqueeze(0)
-        # 扩展维度以满足 inverse_transform 的输入形状
+        # Expand dimensions to match the input shape of inverse_transform
         u_norm = u_norm.unsqueeze(0).unsqueeze(0)
         v_norm = v_norm.unsqueeze(0).unsqueeze(0)
         uv_norm = torch.cat([u_norm, v_norm], dim=-1)
-        # 逆向变换：图像 → 相机 → 基座
+        # Inverse transform: image → camera → base
         P_camera_recon, P_base_recon = camera.inverse_transform(uv_norm, depth)
 
-        # 计算重建误差
+        # Compute reconstruction error
         error = torch.norm(P_base_tensor - P_base_recon)
         max_error = max(max_error, error)
 
         if error > 1e-4:
-            print(f"[警告] 点 {P_base} 重建误差为: {error:.6f}")
+            print(f"[Warning] Point {P_base} reconstruction error: {error:.6f}")
         else:
-            print(f"[正确] 点 {P_base} 变换一致")
+            print(f"[Correct] Point {P_base} transformation is consistent")
 
-    # 输出最大误差
-    print("\n 完成")
-    print(f"最大误差: {max_error:.6e}")
+    # Output maximum error
+    print("\nDone")
+    print(f"Maximum error: {max_error:.6e}")
     return float(max_error)
 
 if __name__ == "__main__":
@@ -360,8 +396,8 @@ if __name__ == "__main__":
     # dx, dy, dz = 2.0, 1.0, -0.2
     # P_base = torch.tensor([[dx, dy, dz]])
     # P_camera, P_image = cam.transform(P_base)
-    # print(f"基座坐标: {P_base}")
-    # print(f"相机坐标: {P_camera}")
-    # print(f"归一化图像坐标: {P_image}")
+    # print(f"Base coordinates: {P_base}")
+    # print(f"Camera coordinates: {P_camera}")
+    # print(f"Normalized image coordinates: {P_image}")
     # # visualize(P_base, P_camera, P_image, cam.img_width, cam.img_height)
     verify_camera_transform(cam, num_points=20)

@@ -39,7 +39,7 @@ class LeggedRobotNavCfg(LeggedRobotCfg):
         num_actions = 12
         env_spacing = 3.  # not used with heightfields/trimeshes 
         send_timeouts = False # send time out information to the algorithm
-        episode_length_s = 8 # episode length in seconds  # will be randomized in [s-2, s]
+        episode_length_s = 16 # episode length in seconds  # will be randomized in [s-2, s]
         camera_res = [640, 360]
         no_head = True
 
@@ -52,7 +52,7 @@ class LeggedRobotNavCfg(LeggedRobotCfg):
             pos_theta = [-3.14, 3.14]  # rad
             heading = [-3.14, 3.14]
 
-    class domain_rand:
+    class domain_rand(LeggedRobotCfg.domain_rand):
         randomize_friction = True
         friction_range = [-0.4, 1.25]
         randomize_base_mass = True
@@ -62,7 +62,7 @@ class LeggedRobotNavCfg(LeggedRobotCfg):
         max_push_vel_xy = 0.6
         randomize_dof_bias = False
         max_dof_bias = 0.0
-        
+
     class rewards():
         tracking_sigma = 0.1 # tracking reward = exp(-error^2/sigma)
         soft_dof_pos_limit = 0.9

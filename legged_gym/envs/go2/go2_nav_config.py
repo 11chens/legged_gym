@@ -31,8 +31,8 @@
 from legged_gym.envs.base.legged_robot_config import LeggedRobotCfgPPO
 from legged_gym.envs.base.legged_robot_nav_config import LeggedRobotNavCfg
 
-NUM_NAV_COMMANDS = 3  # P_img_x, P_img_y, distance
-# NUM_NAV_COMMANDS = 2  # P_img_x, P_img_y
+# NUM_NAV_COMMANDS = 3  # P_img_x, P_img_y, distance
+NUM_NAV_COMMANDS = 2  # P_img_x, P_img_y
 
 class Go2NavFlatCfg( LeggedRobotNavCfg ):
     debug_viz = False
@@ -40,10 +40,10 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
         num_position = 3 # x, y, z
         num_nav_actions = 4 # vx, vy, vyaw, pitch
         history_len = 10
-        num_props = NUM_NAV_COMMANDS + num_nav_actions + 9 # lin_vel, ang_vel, gravity
-        num_observations = num_props * history_len
+        num_props = NUM_NAV_COMMANDS + num_nav_actions + 9 + 1# lin_vel, ang_vel, gravity, timer
+        num_observations = num_props * history_len + 3
         num_envs = 2048
-        episode_length_s = 16 # episode length in seconds  # will be randomized in [s-minus, s]
+        episode_length_s = 9 # episode length in seconds  # will be randomized in [s-minus, s]
         no_nav = True
         fear_ctrl_heading = False
         curriculum_episode_length_s = False
@@ -82,13 +82,9 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
         delay_time = 0.1 # delay time in seconds
         class ranges:
             limit_vx = [-0.0, 1.0]  # [m/s]
-            limit_vy = [-0.3, 0.3]  # [m/s]
+            limit_vy = [-0.05, 0.05]  # [m/s]
             limit_vyaw = [-1.0, 1.0]  # [rad/s]
             limit_pitch = [-0.5, 0.5]  # [rad]
-
-            # limit_vx = [0.35, 0.36]  # [m/s]
-            limit_vy = [-0.05, 0.05]  # [m/s]
-            # limit_vyaw = [-0.0, 0.0]  # [rad/s]
 
             use_polar = False
             # if use polar: it is rho and theta, else x and y
@@ -99,20 +95,43 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
     class camera_sensor:
         enable_camera = False  # if True, the camera sensor is enabled, otherwise it is disabled
         fix_extrinsics = False  # if True, the camera extrinsics are fixed, otherwise they are randomized
-        fix_intrinsics = True  # if True, the camera intrinsics are fixed, otherwise they are randomized
-        img_width = 1280
-        img_height = 720
+        fix_intrinsics = False  # if True, the camera intrinsics are fixed, otherwise they are randomized
+        fix_img_shape = False  # if True, the image shape is fixed, otherwise it is randomized
+
         class intrinsics: # Intrinsics parameters
             # Zed mini, HD720 mode
+            img_width = 1280
+            img_height = 720
             horizontal_fov = 82.33
             fx = 731.995849609375
             fy = 731.995849609375
             cx = 620.0855102539062
             cy = 362.5731201171875
 
+            # Zed mini, VGA mode
+            img_width = 672
+            img_height = 376
+            horizontal_fov = 85.0
+            fx = 367.0 # fx = img_width / (2 * tan(horizontal_fov/2 * pi/180))
+            fy = 367.0 # fy = fx
+            cx = 336.0 # cx = img_width / 2
+            cy = 188.0 # cy = img_height / 2
+
+            horizontal_fov_range = [60.0, 100.0] # [degree]
+            img_height_range = [360, 720] # [pixel]
+            img_width_range = [640, 1280] # [pixel]
+
+
         class extrinsics: # Extrinsics parameters
-            translation = [0.5, 0.0, 0.0] # forward, left, upper
-            angles = [0.0, 10.0, 0.0] # yaw, pitch, roll
+            translation = [0.4, 0.0, 0.0] # forward, left, upper
+            angles = [0.0, 20.0, 0.0] # yaw, pitch, roll
+
+            yaw_range = [-5.0, 5.0]   # [degree]
+            pitch_range = [-30.0, 30.0] # [degree]
+            roll_range = [-5.0, 5.0]  # [degree]
+            dx_range = [0.3, 0.6]   # [m]
+            dy_range = [-0.05, 0.05]   # [m]
+            dz_range = [-0.2, 0.2]   # [m]
 
     class control( LeggedRobotNavCfg.control ):
         # PD Drive parameters:
@@ -132,48 +151,30 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
         name = "go2"
         foot_name = "foot"
         penalize_contacts_on = ["thigh", "calf", "Head_upper", "Head_lower", "base"] # collision reward
-        terminate_after_contacts_on = ["base", "Head_upper", "Head_lower"] # termination rewrad
+        terminate_after_contacts_on = ["base", "Head_upper", "Head_lower"] # termination
         self_collisions = 1 # 1 to disable, 0 to enable...bitwise filter
     
 
     class terrain( LeggedRobotNavCfg.terrain ):
         mesh_type = 'plane'
         terrain_types = ['flat','rough']  # do not duplicate!
-        terrain_proportions = [0.4, 0.6]
+        terrain_proportions = [0.8, 0.2]
         num_rows = 10 # number of terrain rows (levels)
         num_cols = 10 # number of terrain cols (types)
         measure_heights = True
 
-    class domain_rand:
+    class domain_rand( LeggedRobotNavCfg.domain_rand ):
         randomize_friction = True
-        friction_range = [-0.2, 1.25]
+        friction_range = [-0.2, 2.5]
+        randomize_restitution = True
+        restitution_range = [0.0, 1.0]
         randomize_base_mass = True
-        added_mass_range = [-1.5, 1.5]
-        randomize_dof_bias = True
-        max_dof_bias = 0.08
-        randomize_timer_minus = 2.0  # timer_left is initialized with randomization: U(T-this, T)
-
+        added_mass_range = [-1., 3.]
+        randomize_base_com = True
+        added_com_range = [-0.2, 0.2]
         push_robots = True
-        push_interval_s = 2.5
-        max_push_vel_xy = 0.0  # not used
-        
-        randomize_yaw = True
-        randomize_yaw = True
-        init_yaw_range = [-3.14, 3.14]
-        randomize_roll = False
-        randomize_pitch = False
-        randomize_xy = True
-        init_x_range = [-0.5, 0.5]
-        init_y_range = [-0.5, 0.5]
-        randomize_velo = False
-        init_vlinx_range = [-0.5,0.5]
-        init_vliny_range = [-0.5,0.5]
-        init_vlinz_range = [-0.5,0.5]
-        init_vang_range = [-0.5,0.5]
-        randomize_init_dof = True
-        init_dof_factor=[0.5, 1.5]
-        stand_bias3 = [0.0, 0.0, 0.0]
-
+        push_interval_s = 5.0
+        max_push_vel_xy = 0.5
 
     class normalization:
         class obs_scales:
@@ -188,16 +189,18 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
 
     class noise:
         add_noise = True
+        add_camera_noise = True
         noise_level = 1.0
         class noise_scales:
             dof_pos = 0.03 # 0.01 
             dof_vel = 1.75 #1.5
             lin_vel = 0.1 # 0.1
-            ang_vel = 0.2 # 0.2
+            ang_vel = 0.25 # 0.2
             gravity = 0.1 # 0.05
-            height_measurements = 0.1
-            ray2d = 0.2  # 2^0.2 = 1.1487
-    
+            
+            P_img_u = 0.1
+            P_img_v = 0.1
+            P_img_depth = 0.2
 
     class rewards():
         class scales():
@@ -208,13 +211,12 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
             nav_action_rate = 0.0 # -0.5
             nav_action_limit = -1.0
             view_missing = -0.5
-            tracking_horizontal_distance = 1.0
+            tracking_horizontal_distance = 5.0
             horizontal_distance_error = -0.5
             keep_forward = 2.0 # 1.0
-            reach_grasp_area = 1e3
-            # lin_vel_y = -0.1
+            reach_grasp_area = 500
 
-            stand_still = 100.0 # 1.0
+            stand_still = 500 # 1.0
             action_rate = 0.0 # -0.01 # -0.005 
             cmds_track = 0.0 # -0.2 
             torques = 0.0 #  -0.0002
@@ -246,5 +248,6 @@ class Go2NavFlatCfgPPO( LeggedRobotCfgPPO ):
         save_interval = 200  # save model every n iterations
         max_iterations = 5000  # maximum number of training iterations
         
-        policy_class_name = 'ActorCriticRnn'
+        # policy_class_name = 'ActorCriticRnn'
+        policy_class_name = 'ActorCritic'
         algorithm_class_name = 'PPO'
