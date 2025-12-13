@@ -4,47 +4,6 @@ import numpy as np
 import cv2
 from isaacgym.torch_utils import *
 
-class camera_sensor:
-    enable_camera = False  # if True, the camera sensor is enabled, otherwise it is disabled
-    fix_extrinsics = False  # if True, the camera extrinsics are fixed, otherwise they are randomized
-    fix_intrinsics = False  # if True, the camera intrinsics are fixed, otherwise they are randomized
-    fix_img_shape = False  # if True, the image shape is fixed, otherwise it is randomized
-
-    class intrinsics: # Intrinsics parameters
-        # Zed mini, HD720 mode
-        img_width = 1280
-        img_height = 720
-        horizontal_fov = 82.33
-        fx = 731.995849609375
-        fy = 731.995849609375
-        cx = 620.0855102539062
-        cy = 362.5731201171875
-
-        # Zed mini, VGA mode
-        img_width = 672
-        img_height = 376
-        horizontal_fov = 85.0
-        fx = 367.0 # fx = img_width / (2 * tan(horizontal_fov/2 * pi/180))
-        fy = 367.0 # fy = fx
-        cx = 336.0 # cx = img_width / 2
-        cy = 188.0 # cy = img_height / 2
-
-        horizontal_fov_range = [60.0, 100.0] # [degree]
-        img_height_range = [360, 720] # [pixel]
-        img_width_range = [640, 1280] # [pixel]
-
-
-    class extrinsics: # Extrinsics parameters
-        translation = [0.4, 0.0, 0.0] # forward, left, upper
-        angles = [0.0, 15.0, 0.0] # yaw, pitch, roll
-
-        yaw_range = [-3.0, 3.0]   # [degree]
-        pitch_range = [-30.0, 30.0] # [degree]
-        roll_range = [-3.0, 3.0]  # [degree]
-        dx_range = [0.3, 0.6]   # [m]
-        dy_range = [-0.025, 0.025]   # [m]
-        dz_range = [-0.2, 0.2]   # [m]
-
 class CameraSensor:
     """
     A class to simulate a camera sensor in a 3D environment, handling camera intrinsics and extrinsics.
@@ -71,6 +30,7 @@ class CameraSensor:
     def __init__(self, batch_size, cfg=None, device='cpu'):
         self.batch_size = batch_size
         self.cfg = cfg
+        self.clip_invalid = cfg.clip_invalid
         self.fix_extrinsics = cfg.fix_extrinsics
         self.fix_intrinsics = cfg.fix_intrinsics
         self.fix_img_shape = cfg.fix_img_shape
@@ -111,6 +71,11 @@ class CameraSensor:
         self.fy = self.intrinsics_cfg.fy
         self.cx = self.intrinsics_cfg.cx
         self.cy = self.intrinsics_cfg.cy
+        self.horizontal_fov = self.intrinsics_cfg.horizontal_fov
+        if isinstance(self.img_height, torch.Tensor):
+            self.vertical_fov = 2 * torch.atan(self.img_height / (2 * self.fy)) * 180 / np.pi
+        else:
+            self.vertical_fov = 2 * np.arctan(self.img_height / (2 * self.fy)) * 180 / np.pi # [degree]
 
     def _init_random_intrinsics(self):
         """
@@ -121,13 +86,18 @@ class CameraSensor:
         Here, we randomly sample the horizontal field of view (FOV) within a specified range, and compute fx, fy, cx, cy accordingly.
         The image width and height are also randomly sampled within specified ranges.
         """
-        self.horizontal_fov_min = self.intrinsics_cfg.horizontal_fov_range[0]
-        self.horizontal_fov_max = self.intrinsics_cfg.horizontal_fov_range[1]
-        self.horizontal_fov = torch_rand_float(self.horizontal_fov_min, self.horizontal_fov_max, (self.batch_size, 1), device=self.device) # [60, 100]
+        # Use fixed FOV as mean and add noise
+        base_fov = self.intrinsics_cfg.horizontal_fov
+        fov_noise_min = self.intrinsics_cfg.horizontal_fov_range[0]
+        fov_noise_max = self.intrinsics_cfg.horizontal_fov_range[1]
+        noise = torch_rand_float(fov_noise_min, fov_noise_max, (self.batch_size, 1), device=self.device)
+        self.horizontal_fov = base_fov + noise
+
         self.fx = self.img_width / (2 * torch.tan(self.horizontal_fov / 2 * np.pi / 180))
         self.fy = self.fx
         self.cx = self.img_width / 2
         self.cy = self.img_height / 2
+        self.vertical_fov = 2 * torch.atan(self.img_height / (2 * self.fy)) * 180 / np.pi # [degree]
 
     def _init_fixed_extrinsics(self):
         """
@@ -144,8 +114,8 @@ class CameraSensor:
         self.R = torch.empty((self.batch_size, 3, 3), device=self.device)
         for i in range(self.batch_size):
             rmat = R_np.from_euler('ZYX', self.angles[i].cpu().numpy(), degrees=True).as_matrix()
-            r_align = torch.tensor([[0, -1, 0], [0, 0, -1], [1, 0, 0]], dtype=torch.float32)
-            self.R[i] = r_align @ torch.tensor(rmat, dtype=torch.float32)
+            r_align = torch.tensor([[0, -1, 0], [0, 0, -1], [1, 0, 0]], dtype=torch.float32, device=self.device)
+            self.R[i] = r_align @ torch.tensor(rmat.T, dtype=torch.float32, device=self.device)
 
         dx = torch.ones(self.batch_size, 1, device=self.device) * self.extrinsics_cfg.translation[0]
         dy = torch.ones(self.batch_size, 1, device=self.device) * self.extrinsics_cfg.translation[1]
@@ -160,31 +130,36 @@ class CameraSensor:
           The rotation matrix uses ZYX Euler angles in order, and is further multiplied by r_align to convert from the base frame (X forward, Y left, Z up) to the camera frame (X right, Y down, Z forward).
         - Translation vector T: Describes the camera optical center position in the base frame, randomly generated as:
         """
-        self.yaw_min = self.extrinsics_cfg.yaw_range[0]
-        self.yaw_max = self.extrinsics_cfg.yaw_range[1]
-        yaw = torch_rand_float(self.yaw_min, self.yaw_max, (self.batch_size, 1), device=self.device)
-        self.pitch_min = self.extrinsics_cfg.pitch_range[0]
-        self.pitch_max = self.extrinsics_cfg.pitch_range[1]
-        pitch = torch_rand_float(self.pitch_min, self.pitch_max, (self.batch_size, 1), device=self.device) 
-        self.roll_min = self.extrinsics_cfg.roll_range[0]
-        self.roll_max = self.extrinsics_cfg.roll_range[1]
-        roll = torch_rand_float(self.roll_min, self.roll_max, (self.batch_size, 1), device=self.device)  
+        # Angles
+        yaw_noise = torch_rand_float(self.extrinsics_cfg.yaw_range[0], self.extrinsics_cfg.yaw_range[1], (self.batch_size, 1), device=self.device)
+        pitch_noise = torch_rand_float(self.extrinsics_cfg.pitch_range[0], self.extrinsics_cfg.pitch_range[1], (self.batch_size, 1), device=self.device)
+        roll_noise = torch_rand_float(self.extrinsics_cfg.roll_range[0], self.extrinsics_cfg.roll_range[1], (self.batch_size, 1), device=self.device)
+        
+        fixed_angles = torch.tensor(self.extrinsics_cfg.angles, device=self.device).unsqueeze(0) # [1, 3]
+        # angles config is [yaw, pitch, roll]
+        
+        yaw = fixed_angles[:, 0:1] + yaw_noise
+        pitch = fixed_angles[:, 1:2] + pitch_noise
+        roll = fixed_angles[:, 2:3] + roll_noise
+
         self.angles = torch.cat([yaw, pitch, roll], dim=-1)
         self.R = torch.empty((self.batch_size, 3, 3), device=self.device)
         for i in range(self.batch_size):
             rmat = R_np.from_euler('ZYX', self.angles[i].cpu().numpy(), degrees=True).as_matrix()
-            r_align = torch.tensor([[0, -1, 0], [0, 0, -1], [1, 0, 0]], dtype=torch.float32)
-            self.R[i] = r_align @ torch.tensor(rmat, dtype=torch.float32)
+            r_align = torch.tensor([[0, -1, 0], [0, 0, -1], [1, 0, 0]], dtype=torch.float32, device=self.device)
+            self.R[i] = r_align @ torch.tensor(rmat.T, dtype=torch.float32, device=self.device)
 
-        self.dx_min = self.extrinsics_cfg.dx_range[0]
-        self.dx_max = self.extrinsics_cfg.dx_range[1]
-        dx = torch_rand_float(self.dx_min, self.dx_max, (self.batch_size, 1), device=self.device)
-        self.dy_min = self.extrinsics_cfg.dy_range[0]
-        self.dy_max = self.extrinsics_cfg.dy_range[1]
-        dy = torch_rand_float(self.dy_min, self.dy_max, (self.batch_size, 1), device=self.device)
-        self.dz_min = self.extrinsics_cfg.dz_range[0]
-        self.dz_max = self.extrinsics_cfg.dz_range[1]
-        dz = torch_rand_float(self.dz_min, self.dz_max, (self.batch_size, 1), device=self.device)
+        # Translation
+        dx_noise = torch_rand_float(self.extrinsics_cfg.dx_range[0], self.extrinsics_cfg.dx_range[1], (self.batch_size, 1), device=self.device)
+        dy_noise = torch_rand_float(self.extrinsics_cfg.dy_range[0], self.extrinsics_cfg.dy_range[1], (self.batch_size, 1), device=self.device)
+        dz_noise = torch_rand_float(self.extrinsics_cfg.dz_range[0], self.extrinsics_cfg.dz_range[1], (self.batch_size, 1), device=self.device)
+        
+        fixed_trans = torch.tensor(self.extrinsics_cfg.translation, device=self.device).unsqueeze(0) # [1, 3]
+        
+        dx = fixed_trans[:, 0:1] + dx_noise
+        dy = fixed_trans[:, 1:2] + dy_noise
+        dz = fixed_trans[:, 2:3] + dz_noise
+        
         self.T = torch.cat([dx, dy, dz], dim=-1)
 
 
@@ -221,11 +196,14 @@ class CameraSensor:
         v_norm = v / self.img_height
         # coords.shape: [B, 2]
         coords = torch.cat([u_norm, v_norm], dim=-1)
-        # Check if the points are within the field of view and if depth is positive
-        visible = (Z > 0) & (u_norm >= 0) & (u_norm <= 1) & (v_norm >= 0) & (v_norm <= 1)
-        visible = visible.squeeze()
-        # For points outside the field of view or behind the camera, set normalized coordinates to -1
-        coords[~visible] = -1.0
+
+        if self.clip_invalid:
+            # Check if the points are within the field of view and if depth is positive
+            visible = (Z > 0) & (u_norm >= 0) & (u_norm <= 1) & (v_norm >= 0) & (v_norm <= 1)
+            visible = visible.squeeze()
+            # For points outside the field of view or behind the camera, set normalized coordinates to -1
+            coords[~visible] = -1.0
+            
         return coords
 
     def transform(self, P_base: torch.Tensor):
@@ -253,7 +231,7 @@ class CameraSensor:
         Returns:
             Tensor: A collection of camera coordinate points with shape [B, 3].
         """
-        u, v = uv_norm[:, 0], uv_norm[:, 1]
+        u, v = uv_norm[:, 0:1], uv_norm[:, 1:2]
         # Convert normalized coordinates to pixel coordinates
         u_pix = u * self.img_width
         v_pix = v * self.img_height
@@ -261,7 +239,7 @@ class CameraSensor:
         x = (u_pix - self.cx) * depth / self.fx
         y = (v_pix - self.cy) * depth / self.fy
         z = depth
-        return torch.stack([x, y, z], dim=-1)  # [B, 3]
+        return torch.cat([x, y, z], dim=-1)  # [B, 3]
 
     def camera_to_base(self, P_camera: torch.Tensor) -> torch.Tensor:
         """
@@ -315,7 +293,7 @@ class CameraSensor:
         
         if (P_image == -1).any():
             cv2.putText(image, "Out of view or behind camera", 
-                        (10, self.img_height // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                        (10, self.img_height // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         else:
             u_pixel = int(P_image[0] * self.img_width)
             v_pixel = int(P_image[1] * self.img_height)
@@ -323,13 +301,13 @@ class CameraSensor:
             cv2.circle(image, (u_pixel, v_pixel), 5, (0, 0, 255), -1)
             
             text = f"Normal P_img: ({P_image[0]:.3f}, {P_image[1]:.3f})"
-            cv2.putText(image, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            cv2.putText(image, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
             
             text_base = f"P_base: ({P_base[0]:.3f}, {P_base[1]:.3f}, {P_base[2]:.3f})"
-            cv2.putText(image, text_base, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            cv2.putText(image, text_base, (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
             
             text_camera = f"P_cam: ({P_camera[0]:.3f}, {P_camera[1]:.3f}, {P_camera[2]:.3f})"
-            cv2.putText(image, text_camera, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            cv2.putText(image, text_camera, (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
         
         cv2.imshow("Camera View", image)
         

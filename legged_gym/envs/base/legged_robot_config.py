@@ -141,6 +141,13 @@ class LeggedRobotCfg(BaseConfig):
         randomize_lag_timesteps = True
         lag_timesteps = 3
         
+        randomize_yaw = True
+        randomize_pitch = True
+        randomize_roll = True
+        init_yaw_range = [-3.14, 3.14]
+        init_pitch_range = [-0.1, 0.1]
+        init_roll_range = [-0.1, 0.1]
+
     class rewards:
         class scales:
             termination = -0.0

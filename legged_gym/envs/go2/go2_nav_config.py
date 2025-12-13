@@ -30,20 +30,43 @@
 
 from legged_gym.envs.base.legged_robot_config import LeggedRobotCfgPPO
 from legged_gym.envs.base.legged_robot_nav_config import LeggedRobotNavCfg
+from legged_gym.envs.base.target_config import TargetCfg
 
-# NUM_NAV_COMMANDS = 3  # P_img_x, P_img_y, distance
-NUM_NAV_COMMANDS = 2  # P_img_x, P_img_y
+# NUM_NAV_COMMANDS = 2  # P_img_x, P_img_y
+NUM_SIGMA_POINTS = 5
+NUM_NAV_COMMANDS = 15 # 5 points * 3 coords (x, y, z) in Base Frame
+EPISODE_LENGTH_S = 12
+USE_RNN = False
 
 class Go2NavFlatCfg( LeggedRobotNavCfg ):
-    debug_viz = False
+    target = TargetCfg
+    debug_viz = True
+    pixel_gain = 10.0
     class env(LeggedRobotNavCfg.env):
         num_position = 3 # x, y, z
         num_nav_actions = 4 # vx, vy, vyaw, pitch
-        history_len = 10
-        num_props = NUM_NAV_COMMANDS + num_nav_actions + 9 + 1# lin_vel, ang_vel, gravity, timer
-        num_observations = num_props * history_len + 3
+        nav_history_len = 10
+        history_len = 5
+        # num_priv = 3 + 1 # +3 for P_base, +1 for timer
+        # num_priv = 3
+        num_sigma_points = NUM_SIGMA_POINTS
+        num_nav_commands = NUM_NAV_COMMANDS # 5 points * 2 (u, v) + 1 (distance)
+        # num_props = num_nav_actions + 11 # lin_vel(3), ang_vel(3), gravity(3), pitch(1), phase(1)
+        # num_props = num_nav_actions + num_nav_commands + 10 # lin_vel(3), ang_vel(3), gravity(3), pitch(1)
+        num_props = num_nav_actions + num_nav_commands + 12 # lin_vel(3), ang_vel(3), gravity(3), rpy(3)
+        
+        # num_priv = 3 + 1 # +3 for P_base, +1 for timer
+        num_priv = NUM_SIGMA_POINTS * 3 # P_camera [N, M, 3] flattened
+        
+        if USE_RNN:
+            num_observations = num_props * history_len
+            num_privileged_obs = num_props * history_len + num_priv
+        else:
+            num_observations = num_nav_commands * nav_history_len + num_props * history_len + num_priv
+            num_privileged_obs = None
+
         num_envs = 2048
-        episode_length_s = 9 # episode length in seconds  # will be randomized in [s-minus, s]
+        episode_length_s = EPISODE_LENGTH_S # episode length in seconds  # will be randomized in [s-minus, s]
         no_nav = True
         fear_ctrl_heading = False
         curriculum_episode_length_s = False
@@ -74,64 +97,110 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
     
 
     class commands:
+        add_boost = False
+        img_frame = True  # if True, the commands are given in the image frame, otherwise in the camera frame
         curriculum = False
         max_curriculum = 1.
         num_commands = 4
         num_nav_commands = NUM_NAV_COMMANDS
-        resampling_time = 6
-        delay_time = 0.1 # delay time in seconds
-        class ranges:
-            limit_vx = [-0.0, 1.0]  # [m/s]
-            limit_vy = [-0.05, 0.05]  # [m/s]
-            limit_vyaw = [-1.0, 1.0]  # [rad/s]
-            limit_pitch = [-0.5, 0.5]  # [rad]
+        resampling_time = 2.0
+        start_resampling_time = 3.0
+        end_resampling_time = EPISODE_LENGTH_S - 2.0
+        period_s = 0.2  # [s] time period for timing-based commands
+        enable_delay = False
+        max_delay_time_ms = 50  # maximum delay time in milliseconds
+        min_delay_time_ms = 0  # minimum delay time in milliseconds
 
-            use_polar = False
-            # if use polar: it is rho and theta, else x and y
-            pos_1 = [1.5, 7.5] # min max [m] 
-            pos_2 = [-2.0, 2.0]  # rad if polar
+        class ranges:
+            limit_vx = [0.18, 0.5]  # [m/s]
+            limit_vy = [-0.1, 0.1]  # [m/s]
+            limit_vyaw = [-1.0, 1.0]  # [rad/s]
+            limit_pitch = [-3.14/6, 3.14/6]  # [rad]
             heading = [-0.3, 0.3]  # a residual heading plus theta
     
     class camera_sensor:
-        enable_camera = False  # if True, the camera sensor is enabled, otherwise it is disabled
+        enable_camera = False  # if True, the image of isaacgym is enabled, otherwise it is disabled
         fix_extrinsics = False  # if True, the camera extrinsics are fixed, otherwise they are randomized
         fix_intrinsics = False  # if True, the camera intrinsics are fixed, otherwise they are randomized
         fix_img_shape = False  # if True, the image shape is fixed, otherwise it is randomized
+        clip_invalid = False # if True, the invalid image coordinates are clipped to -1, otherwise they are kept as is
+        max_out_of_view_duration = 2.0 # [s] the duration to keep the out of view coordinates
+        enable_out_of_view_drift = True # if True, add random walk drift when out of view
+        drift_scale = 0.02 # scale of the random walk drift per step
 
         class intrinsics: # Intrinsics parameters
             # Zed mini, HD720 mode
-            img_width = 1280
-            img_height = 720
-            horizontal_fov = 82.33
-            fx = 731.995849609375
-            fy = 731.995849609375
-            cx = 620.0855102539062
-            cy = 362.5731201171875
+            # img_width = 1280
+            # img_height = 720
+            # horizontal_fov = 82.33
+            # fx = 731.995849609375
+            # fy = 731.995849609375
+            # cx = 620.0855102539062
+            # cy = 362.5731201171875
 
-            # Zed mini, VGA mode
-            img_width = 672
-            img_height = 376
-            horizontal_fov = 85.0
-            fx = 367.0 # fx = img_width / (2 * tan(horizontal_fov/2 * pi/180))
-            fy = 367.0 # fy = fx
-            cx = 336.0 # cx = img_width / 2
-            cy = 188.0 # cy = img_height / 2
+            # # Zed mini, VGA mode
+            # img_width = 672
+            # img_height = 376
+            # horizontal_fov = 85.0
+            # fx = 367.0 # fx = img_width / (2 * tan(horizontal_fov/2 * pi/180))
+            # fy = 367.0 # fy = fx
+            # cx = 336.0 # cx = img_width / 2
+            # cy = 188.0 # cy = img_height / 2
 
-            horizontal_fov_range = [60.0, 100.0] # [degree]
-            img_height_range = [360, 720] # [pixel]
-            img_width_range = [640, 1280] # [pixel]
+            # # Zed mini, HD720 mode, scaled to 320x180
+            # img_width = 320
+            # img_height = 180
+            # horizontal_fov = 82.33
+            # fx = 182.9919 # fx = img_width / (2 * tan(horizontal_fov/2 * pi/180))
+            # fy = 182.9919 # fy = fx
+            # cx = 155.02 # 160.0
+            # cy = 90.64 # 90.0
 
+            # Realsense D435i
+            # 640x360, HFOV=70.26
+            img_width = 640
+            img_height = 360
+            horizontal_fov = 70.26
+            fx = 454.768310546875  # fx = img_width / (2 * np.tan(np.deg2rad(horizontal_fov) / 2))
+            fy = 454.4901123046875
+            cx = 325.7699279785156
+            cy = 184.68618774414062
+
+
+            # 320*180
+            # img_width = 320
+            # img_height = 180
+            # fx = 227.3841552734375
+            # fy = 227.24505615234375
+            # cx = 162.8849639892578
+            # cy = 92.34309387207031
+
+            # 320*240
+            img_width = 320
+            img_height = 240
+            fx = 303.1788635253906
+            fy = 302.993408203125
+            cx = 163.8466033935547
+            cy = 123.1241226196289
+
+            horizontal_fov_range = [-2.0, 2.0] # [degree]
+            img_height_range = [90, 720] # [pixel]
+            img_width_range = [160, 1280] # [pixel]
 
         class extrinsics: # Extrinsics parameters
-            translation = [0.4, 0.0, 0.0] # forward, left, upper
-            angles = [0.0, 20.0, 0.0] # yaw, pitch, roll
+            #  ================= fixed extrinsics =================
+            translation = [0.305, 0.017, 0.128]  # Translation: forward, left, upward
+            angles = [0.0, 30.0, 0.0]  # Euler angles: yaw, pitch, roll
+            
+            #  ================= random extrinsics =================
+            # Randomization ranges around the fixed extrinsics
+            yaw_range = [-0.5, 0.5]   # [degree]
+            pitch_range = [-2.0, 10.0] # [degree]
+            roll_range = [-0.5, 0.5]  # [degree]
 
-            yaw_range = [-5.0, 5.0]   # [degree]
-            pitch_range = [-30.0, 30.0] # [degree]
-            roll_range = [-5.0, 5.0]  # [degree]
-            dx_range = [0.3, 0.6]   # [m]
-            dy_range = [-0.05, 0.05]   # [m]
-            dz_range = [-0.2, 0.2]   # [m]
+            dx_range = [-0.01, 0.01]   # [m]
+            dy_range = [-0.01, 0.01]   # [m]
+            dz_range = [-0.01, 0.01]   # [m]
 
     class control( LeggedRobotNavCfg.control ):
         # PD Drive parameters:
@@ -169,12 +238,22 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
         randomize_restitution = True
         restitution_range = [0.0, 1.0]
         randomize_base_mass = True
-        added_mass_range = [-1., 3.]
+        added_mass_range = [-1., 2.0]
         randomize_base_com = True
-        added_com_range = [-0.2, 0.2]
+        added_com_range = [-0.05, 0.05]
         push_robots = True
-        push_interval_s = 5.0
-        max_push_vel_xy = 0.5
+        push_interval_s = 5
+        c = 0.5
+        roll_robots = False
+        max_vel_roll = 1.57 / 3  # [rad/s]
+        roll_interval = 0.4 / 0.02
+
+        randomize_yaw = False
+        randomize_pitch = False
+        randomize_roll = False
+        init_yaw_range = [-3.14, 3.14]
+        init_pitch_range = [-0.1, 0.1]
+        init_roll_range = [-0.1, 0.1]
 
     class normalization:
         class obs_scales:
@@ -184,6 +263,8 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
             dof_vel = 0.05
             height_measurements = 2.0
             pitch = 1.0
+            euler_rpy = 1.0
+
         clip_observations = 100.
         clip_actions = 100.
 
@@ -191,37 +272,41 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
         add_noise = True
         add_camera_noise = True
         noise_level = 1.0
+        invalid_depth_interval_s = 2.0
+        invalid_p_img_interval_s = 5.0
         class noise_scales:
-            dof_pos = 0.03 # 0.01 
-            dof_vel = 1.75 #1.5
+            dof_pos = 0.01 # 0.01 
+            dof_vel = 1.0 # 1.0
             lin_vel = 0.1 # 0.1
-            ang_vel = 0.25 # 0.2
-            gravity = 0.1 # 0.05
+            ang_vel = 0.1 # 0.2
+            gravity = 0.05 # 0.05
+            pitch = 0.1 # 0.1
+            euler_rpy = 0.1
             
-            P_img_u = 0.1
-            P_img_v = 0.1
+            P_img_u = 0.01
+            P_img_v = 0.01
             P_img_depth = 0.2
 
     class rewards():
         class scales():
             heading_target = 2.0 # 1.0
-            lin_vel_z = -1.0 # -3.0 
-            ang_vel_xy =  -0.2 
-            orientation_y = -1.0
-            nav_action_rate = 0.0 # -0.5
-            nav_action_limit = -1.0
-            view_missing = -0.5
-            tracking_horizontal_distance = 5.0
-            horizontal_distance_error = -0.5
-            keep_forward = 2.0 # 1.0
-            reach_grasp_area = 500
+            lin_vel_z = -1.0 # -3.0
+            ang_vel_xy = -0.1
+            orientation_y = -4.0
+            nav_action_rate = -2.0
+            nav_action_limit = -2.0
+            view_missing = -2.0
+            tracking_horizontal_distance = 50.0
+            tracking_view_center = 0.5
+            horizontal_distance_error = -0.0
+            forward = 1.0 # 1.0
+            reach_grasp_area = 0
 
-            stand_still = 500 # 1.0
+            stand_still = 0 # 500.0
             action_rate = 0.0 # -0.01 # -0.005 
             cmds_track = 0.0 # -0.2 
             torques = 0.0 #  -0.0002
             reach_target = 0.0 # 50.0 
-
 
         soft_dof_pos_limit = 0.95
         base_height_target = 0.25
@@ -238,16 +323,34 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
 class Go2NavFlatCfgPPO( LeggedRobotCfgPPO ):
     runner_class_name = 'OnPolicyRunner'
     class algorithm( LeggedRobotCfgPPO.algorithm ):
-        entropy_coef = 0.003
         # entropy_coef = 0.05
+        # entropy_coef = 0.003
+        entropy_coef = 0.01
+
         
     class runner( LeggedRobotCfgPPO.runner ):
         run_name = ''
         experiment_name = 'go2_nav_flat'
 
         save_interval = 200  # save model every n iterations
-        max_iterations = 5000  # maximum number of training iterations
+        max_iterations = 4000  # maximum number of training iterations
         
         # policy_class_name = 'ActorCriticRnn'
-        policy_class_name = 'ActorCritic'
+        if USE_RNN:
+            policy_class_name = 'ActorCriticRecurrent'
+        else:
+            policy_class_name = 'ActorCriticEncoder'
+            # policy_class_name = "ActorCriticRecurrentEncoder"
         algorithm_class_name = 'PPO'
+
+    class policy( LeggedRobotCfgPPO.policy ):
+        actor_hidden_dims = [512, 256, 128]
+        critic_hidden_dims = [512, 256, 128]
+        rnn_type = 'gru'
+
+        # actor_hidden_dims = [256, 128, 64]
+        # critic_hidden_dims = [256, 128, 64]
+        # rnn_hidden_size = 128
+
+        # actor_hidden_dims = [128, 64, 32]
+        # critic_hidden_dims = [128, 64, 32]

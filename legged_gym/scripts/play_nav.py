@@ -43,12 +43,13 @@ parser = argparse.ArgumentParser(description="Run the Go2 robot in navigation en
 parser.add_argument("--debug", action="store_true", help="Enable debug mode.")
 parser.add_argument("--headless", action="store_true", default=False, help="Force display off at all times.")
 parser.add_argument("--load_run", type=str,  help="Name of the run to load when resume=True. If -1: will load the last run. Overrides config file if provided."),
+parser.add_argument("--checkpoint", type=int,  help="Saved model checkpoint number. If -1: will load the last checkpoint. Overrides config file if provided.")
 args = parser.parse_args()
 
 if args.debug:
     import debugpy
 
-    ip_address = ("0.0.0.0", 9999)
+    ip_address = ("0.0.0.0", 6666)
     print(f"Process: {sys.argv[:]}")
     print(f"Is waiting for attach at {ip_address[0]}:{ip_address[1]}", flush=True)
     debugpy.listen(ip_address)
@@ -60,6 +61,8 @@ def play(args):
     env: LeggedRobotNav
     env_cfg: Go2NavFlatCfg
 
+    # args.load_run = '12_08_22-24-56_'
+    # args.checkpoint = 1000
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     # override some parameters for testing
     env_cfg.env.num_envs = 1
@@ -78,6 +81,7 @@ def play(args):
     # prepare environment
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
     obs = env.get_observations()
+    # priv_obs = env.get_privileged_observations()
     # load policy
     train_cfg.runner.resume = True
     ppo_runner, train_cfg = task_registry.make_alg_runner(env=env,
@@ -99,8 +103,10 @@ def play(args):
 
     # TODO: video recording
     for i in range(20 * int(env.max_episode_length)):
+
         actions = policy(obs.detach())
-        obs, _, rews, dones, infos = env.step(actions.detach())
+        obs, priv_obs, rews, dones, infos = env.step(actions.detach())
+
         dx = env.goal_base[0, 0].item()
         dy = env.goal_base[0, 1].item()
         dz = env.goal_base[0, 2].item()
@@ -110,22 +116,27 @@ def play(args):
         cyaw = env.nav_actions[0, 2].item()
         cpitch = env.nav_actions[0, 3].item()
 
+        u_c = env.nav_commands[0, 0].item()
+        v_c = env.nav_commands[0, 1].item()
+        depth_c = env.nav_commands[0, 2].item()
 
-        u = env.nav_commands[0, 0].item()
-        v = env.nav_commands[0, 1].item()
-        # depth = env.nav_commands[0, 2].item()
+        u = env.P_image[0, 0].item()
+        v = env.P_image[0, 1].item()
+        depth = env.depth[0].item()
 
         vx = env.base_lin_vel[0, 0]
         vy = env.base_lin_vel[0, 1]
         vyaw = env.base_ang_vel[0, 2]
         pitch = env.euler_rpy[0, 1]
 
+        distance = env.distance[0].item()
 
-
-        # print(f"P_img: ({u:.2f}, {v:.2f}, {depth:.2f})")
-        # print(f"Action: ({cx:.2f}, {cy:.2f}, {cyaw:.2f}, {cpitch:.2f})")
-        # print(f"Base: ({vx:.2f}, {vy:.2f}, {vyaw:.2f}, {pitch:.2f})")
-        # print(f"Distance: ({env.distance[0]:.2f})")
+        # print(f"vel: ({vx:.2f}, {vy:.2f}, {vyaw:.2f}, {pitch:.2f})")
+        # print(f"P_img: (u:{u:.2f}, v:{v:.2f}, d:{depth:.2f})")
+        print(f"Command: (u_c:{u_c:.2f}, v_c:{v_c:.2f}, d_c:{depth_c:.2f})")
+        print(f"Action: (cx: {cx:.2f}, cy: {cy:.2f}, cyaw: {cyaw:.2f}, cpitch: {cpitch:.2f})")
+        print(f"Base: ({vx:.2f}, {vy:.2f}, {vyaw:.2f}, {pitch:.2f})")
+        print(f"Distance: ({distance:.2f})")
         
 if __name__ == '__main__':
     EXPORT_ONNX = True

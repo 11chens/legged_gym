@@ -510,17 +510,37 @@ class LeggedRobot(BaseTask):
             self.root_states[env_ids, :3] += self.env_origins[env_ids]
         # base velocities
         self.root_states[env_ids, 7:13] = torch_rand_float(-0.5, 0.5, (len(env_ids), 6), device=self.device) # [7:10]: lin vel, [10:13]: ang vel
+
+
+        if self.cfg.domain_rand.randomize_yaw:  # yaw
+            _yaw = torch.zeros_like(self.root_states[env_ids, 3]).uniform_(self.cfg.domain_rand.init_yaw_range[0], self.cfg.domain_rand.init_yaw_range[1])
+        else:
+            _yaw = torch.zeros_like(self.root_states[env_ids, 3]) 
+        if self.cfg.domain_rand.randomize_roll:  # roll
+            roll = torch.zeros_like(self.root_states[env_ids, 3]).uniform_(self.cfg.domain_rand.init_roll_range[0], self.cfg.domain_rand.init_roll_range[1])
+        else:
+            roll = torch.zeros_like(self.root_states[env_ids, 3])
+        if self.cfg.domain_rand.randomize_pitch:  # pitch
+            pitch = torch.zeros_like(self.root_states[env_ids, 3]).uniform_(self.cfg.domain_rand.init_pitch_range[0], self.cfg.domain_rand.init_pitch_range[1])
+        else:
+            pitch = torch.zeros_like(self.root_states[env_ids, 3])
+        
+        self.root_states[env_ids, 3:7] = quat_from_euler_xyz(roll, pitch, _yaw)
+
+
         env_ids_int32 = env_ids.to(dtype=torch.int32)
         self.gym.set_actor_root_state_tensor_indexed(self.sim,
                                                      gymtorch.unwrap_tensor(self.root_states),
                                                      gymtorch.unwrap_tensor(env_ids_int32), len(env_ids_int32))
+
+        
+
 
     def _push_robots(self):
         """ Random pushes the robots. Emulates an impulse by setting a randomized base velocity. 
         """
         max_vel = self.cfg.domain_rand.max_push_vel_xy
         self.root_states[:, 7:9] = torch_rand_float(-max_vel, max_vel, (self.num_envs, 2), device=self.device) # lin vel x/y
-        self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(self.root_states))
 
     def _update_terrain_curriculum(self, env_ids):
         """ Implements the game-inspired curriculum.

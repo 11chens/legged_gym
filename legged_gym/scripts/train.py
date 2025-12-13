@@ -42,12 +42,14 @@ import argparse
 parser = argparse.ArgumentParser(description="Run the Go2 robot in navigation environment.")
 parser.add_argument("--debug", action="store_true", help="Enable debug mode.")
 parser.add_argument("--headless", action="store_true", default=False, help="Force display off at all times.")
+parser.add_argument("--num_envs", type=int, default=4096, help="Number of environments to train on simultaneously.")
 args = parser.parse_args()
 
 if args.debug:
     import debugpy
 
-    ip_address = ("0.0.0.0", 9999)
+    args.headless = False
+    ip_address = ("0.0.0.0", 6666)
     print(f"Process: {sys.argv[:]}")
     print(f"Is waiting for attach at {ip_address[0]}:{ip_address[1]}", flush=True)
     debugpy.listen(ip_address)
@@ -56,7 +58,6 @@ if args.debug:
 
 
 def train(args):
-    # args.num_envs = 20
     env, env_cfg = task_registry.make_env(name=args.task, args=args)
     ppo_runner, train_cfg = task_registry.make_alg_runner(env=env, name=args.task, args=args)
     ppo_runner.learn(num_learning_iterations=train_cfg.runner.max_iterations, init_at_random_ep_len=True)
