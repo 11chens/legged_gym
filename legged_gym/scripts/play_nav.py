@@ -107,9 +107,9 @@ def play(args):
         actions = policy(obs.detach())
         obs, priv_obs, rews, dones, infos = env.step(actions.detach())
 
-        dx = env.goal_base[0, 0].item()
-        dy = env.goal_base[0, 1].item()
-        dz = env.goal_base[0, 2].item()
+        dx = env.P_base[0, 0].item()
+        dy = env.P_base[0, 1].item()
+        dz = env.P_base[0, 2].item()
 
         cx = env.nav_actions[0, 0].item()
         cy = env.nav_actions[0, 1].item()

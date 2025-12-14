@@ -222,7 +222,7 @@ class LeggedRobotNav(LeggedRobot):
         """
         super()._init_buffers()
                 
-        self.goal_base = torch.zeros(self.num_envs, self.cfg.env.num_position, dtype=torch.float, device=self.device, requires_grad=False)
+        self.P_base = torch.zeros(self.num_envs, self.cfg.env.num_position, dtype=torch.float, device=self.device, requires_grad=False)
         self.distance = torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
         self.objct_z = torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
         self.target_moved = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device, requires_grad=False)
@@ -509,7 +509,7 @@ class LeggedRobotNav(LeggedRobot):
 
         # pos in world -> pos in robot
         pos_diff = self.object_pos - self.root_states[:, 0:3]
-        self.goal_base = quat_rotate_inverse(self.base_quat, pos_diff)
+        self.P_base = quat_rotate_inverse(self.base_quat, pos_diff)
 
         # compute camera pose in world frame
         # self.camera_position.shape: torch.Size([3]), should be (num_envs, 3)
@@ -523,7 +523,7 @@ class LeggedRobotNav(LeggedRobot):
         self.R_world_to_cam = torch.bmm(R_base_to_cam, R_base_to_world.transpose(1, 2))
 
         # compute goal positions in camera frame and image plane
-        self.P_camera, self.P_image = self.camera_sensor.transform(self.goal_base)
+        self.P_camera, self.P_image = self.camera_sensor.transform(self.P_base)
         
         # Check if physically out of view
         u = self.P_image[:, 0]
@@ -1173,8 +1173,7 @@ class LeggedRobotNav(LeggedRobot):
         """ Reward for facing the target
         """
         # Calculate the angle of the target in the robot's base frame
-        # self.goal_base[:, 0] is x (forward), self.goal_base[:, 1] is y (left)
-        heading_error = torch.abs(torch.atan2(self.goal_base[:, 1], self.goal_base[:, 0]))
+        heading_error = torch.abs(torch.atan2(self.P_base[:, 1], self.P_base[:, 0]))
         # forward_w = quat_apply(self.base_quat, self.forward_vec)
         # base_theta = torch.atan2(forward_w[:, 1], forward_w[:, 0])
         # pos_diff_w = (self.object_pos - self.root_states[:, :3])
@@ -1195,10 +1194,7 @@ class LeggedRobotNav(LeggedRobot):
         """ Reward for align the goal position with the center of the view
         """
         tight_area = self.distance < 0.4
-        # align_error = torch.square((self.P_image[:, 0] - 0.5)) + 0.1 * torch.square((self.P_image[:, 1] - 0.5))
-        dy_error = torch.square(self.goal_base[:, 1])
-        # print(f"P_img: ({self.P_image[0,0].item():.3f}, {self.P_image[0,1].item():.3f})")
-        # print(f"rew: {torch.exp(-align_error / 0.002)[0].item():.5f}")
+        dy_error = torch.square(self.P_base[:, 1])
         pitch_restricted = torch.logical_and(self.euler_rpy[:, 1] > 0.35, self.object_pos[:, 2] < 0.2)
         return pitch_restricted.float() * tight_area * torch.exp(-dy_error/0.1)
     
@@ -1207,20 +1203,13 @@ class LeggedRobotNav(LeggedRobot):
         """
         soft_area = self.distance < 1.25
         tight_area = self.distance < 0.4
-        # theta_error = torch.square(self.goal_base[:, 1] / torch.clamp(self.goal_base[:, 0], min=0.4))
-        # print(f"P_img: ({self.P_image[0,0].item():.3f}, {self.P_image[0,1].item():.3f})")
-        # print(f"theta_error: {theta_error[0].item():.5f}")
-        dy_error = torch.abs(self.goal_base[:, 1])
-        # slow_approach = torch.logical_and(self.base_lin_vel[:, 0] < 0.35, self.base_lin_vel[:, 0] > 0.1)  # robot should slow down when approaching the target
-        # print(f"rew: {torch.exp(-theta_error / 0.05)[0].item():.5f}")
-        # no_lateral_vel = torch.abs(self.base_lin_vel[:, 1]) < 0.1
-        # slow_approach = torch.logical_and(slow_approach, no_lateral_vel)
+        dy_error = torch.abs(self.P_base[:, 1])
         return torch.exp(-dy_error / 0.005) * tight_area + 0.1 * torch.exp(-dy_error/0.1) * soft_area
 
     def _reward_horizontal_distance_error(self):
         # Penalize large horizontal distance error
         target_grasp_width = 0.1
-        dy_error = torch.abs(self.goal_base[:, 1]) - target_grasp_width
+        dy_error = torch.abs(self.P_base[:, 1]) - target_grasp_width
         dy_error = torch.clip(dy_error, min=0.0)
         return torch.square(dy_error)
     
@@ -1238,7 +1227,7 @@ class LeggedRobotNav(LeggedRobot):
 
     def _reward_reach_grasp_area(self):
         target_grasp_width = 0.04
-        grasp_area = (torch.abs(self.goal_base[:, 1]) < (target_grasp_width/2.0))
+        grasp_area = (torch.abs(self.P_base[:, 1]) < (target_grasp_width/2.0))
         reach_grasp_distance = (self.distance < 0.6)
         slow_approach = torch.logical_and(self.base_lin_vel[:, 0] < 0.35, self.base_lin_vel[:, 0] > 0.1)  # robot should slow down when approaching the target
         return reach_grasp_distance * grasp_area.float() * slow_approach.float()
