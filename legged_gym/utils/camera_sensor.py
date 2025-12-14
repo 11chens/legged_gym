@@ -67,15 +67,26 @@ class CameraSensor:
         - fx, fy: Focal lengths (in pixels), controlling the scaling in the x and y directions.
         - cx, cy: Principal points (in pixels), usually located at the center of the image.
         """
-        self.fx = self.intrinsics_cfg.fx
-        self.fy = self.intrinsics_cfg.fy
-        self.cx = self.intrinsics_cfg.cx
-        self.cy = self.intrinsics_cfg.cy
+        # [Fix] Ignore config fx/fy and recalculate to match Isaac Gym's rendering logic
         self.horizontal_fov = self.intrinsics_cfg.horizontal_fov
-        if isinstance(self.img_height, torch.Tensor):
-            self.vertical_fov = 2 * torch.atan(self.img_height / (2 * self.fy)) * 180 / np.pi
+        
+        # Handle potential Tensor types for img_width/height
+        if isinstance(self.img_width, torch.Tensor):
+            tan_func = torch.tan
+            pi_val = np.pi
         else:
-            self.vertical_fov = 2 * np.arctan(self.img_height / (2 * self.fy)) * 180 / np.pi # [degree]
+            tan_func = np.tan
+            pi_val = np.pi
+
+        # fx = W / (2 * tan(HFOV / 2))
+        self.fx = self.img_width / (2 * tan_func(self.horizontal_fov / 2 * pi_val / 180))
+        
+        # fy: Isaac Gym uses linear VFOV scaling: VFOV = (H/W) * HFOV
+        self.vertical_fov = (self.img_height / self.img_width) * self.horizontal_fov
+        self.fy = self.img_height / (2 * tan_func(self.vertical_fov / 2 * pi_val / 180))
+        
+        self.cx = self.img_width / 2
+        self.cy = self.img_height / 2
 
     def _init_random_intrinsics(self):
         """
@@ -93,11 +104,16 @@ class CameraSensor:
         noise = torch_rand_float(fov_noise_min, fov_noise_max, (self.batch_size, 1), device=self.device)
         self.horizontal_fov = base_fov + noise
 
+        # Calculate fx based on Horizontal FOV
         self.fx = self.img_width / (2 * torch.tan(self.horizontal_fov / 2 * np.pi / 180))
-        self.fy = self.fx
+        
+        # [Fix] Calculate fy based on Isaac Gym's linear VFOV formula: VFOV = (H/W) * HFOV
+        # This handles the case where Isaac Gym doesn't use square pixels or standard pinhole model for VFOV
+        self.vertical_fov = (self.img_height / self.img_width) * self.horizontal_fov
+        self.fy = self.img_height / (2 * torch.tan(self.vertical_fov / 2 * np.pi / 180))
+        
         self.cx = self.img_width / 2
         self.cy = self.img_height / 2
-        self.vertical_fov = 2 * torch.atan(self.img_height / (2 * self.fy)) * 180 / np.pi # [degree]
 
     def _init_fixed_extrinsics(self):
         """
@@ -203,7 +219,7 @@ class CameraSensor:
             visible = visible.squeeze()
             # For points outside the field of view or behind the camera, set normalized coordinates to -1
             coords[~visible] = -1.0
-            
+
         return coords
 
     def transform(self, P_base: torch.Tensor):

@@ -45,7 +45,9 @@ class PCATargetTracker:
             self.local_points, self.local_normals = self.shape.sample_surface(self.num_points, self.num_envs, shape_params)
             # self.local_points: [num_envs, num_points, 3]
         
-    def compute_features(self, object_pos, object_quat, camera_params, camera_transform, use_geometric_weight=True, debug_timer=False):
+        self.debug_counter = 0
+
+    def compute_features(self, object_pos, object_quat, camera_params, camera_transform, use_geometric_weight=True, debug_timer=False, debug_info=False):
         """
         Computes PCA features for the tracked object.
         
@@ -56,6 +58,7 @@ class PCATargetTracker:
             camera_transform (dict): Camera extrinsics ('R', 'T').
             use_geometric_weight (bool): Whether to use geometric weighting for anti-drift.
             debug_timer (bool): If True, prints timing info.
+            debug_info (bool): If True, prints detailed debug information.
             
         Returns:
             sigma_points (Tensor): [num_envs, 5, 2]
@@ -89,12 +92,15 @@ class PCATargetTracker:
         t2 = time.time()
         
         # 3. Projection
-        points_2d = project_points(points_world, camera_params, camera_transform)
+        points_2d, valid_mask = project_points(points_world, camera_params, camera_transform)
+        
+        # Filter weights by valid mask (Z > 0)
+        weights = weights * valid_mask.unsqueeze(-1).float()
         
         t3 = time.time()
         
         # 4. PCA
-        mean, eigvals, eigvecs = compute_weighted_pca(points_2d, weights)
+        mean, eigvals, eigvecs, valid_2d = compute_weighted_pca(points_2d, weights)
         
         t4 = time.time()
         
@@ -102,11 +108,43 @@ class PCATargetTracker:
         sigma_points = generate_sigma_points(mean, eigvals, eigvecs, alpha=1.5)
         
         # 6. PCA (3D)
-        mean_3d, eigvals_3d, eigvecs_3d = compute_weighted_pca(points_world, weights)
+        mean_3d, eigvals_3d, eigvecs_3d, valid_3d = compute_weighted_pca(points_world, weights)
         sigma_points_3d = generate_sigma_points(mean_3d, eigvals_3d, eigvecs_3d, alpha=1.5)
+        
+        # Combine validity
+        is_valid = valid_2d & valid_3d
         
         t5 = time.time()
         
+        if debug_info:
+            self.debug_counter += 1
+            if debug_timer or (self.debug_counter % 50 == 0):
+                print(f"\n[Tracker Debug Env 0] Step {self.debug_counter}")
+                print(f"  Cam Pos: {cam_pos[0].tolist()}")
+                print(f"  Obj Pos: {object_pos[0].tolist()}")
+                print(f"  Valid: {is_valid[0].item()}")
+                
+                # Check if inputs are changing
+                if not hasattr(self, '_debug_last_cam_pos'):
+                    self._debug_last_cam_pos = cam_pos[0].clone()
+                    self._debug_last_pts_2d = points_2d[0].clone()
+                else:
+                    cam_diff = (cam_pos[0] - self._debug_last_cam_pos).norm().item()
+                    pts_diff = (points_2d[0] - self._debug_last_pts_2d).norm().item()
+                    print(f"  Delta Cam Pos: {cam_diff:.6f}")
+                    print(f"  Delta Pts 2D:  {pts_diff:.6f}")
+                    
+                    if cam_diff > 1e-4 and pts_diff < 1e-5:
+                        print(f"  WARNING: Camera moved but Points 2D didn't change!")
+                    
+                    self._debug_last_cam_pos = cam_pos[0].clone()
+                    self._debug_last_pts_2d = points_2d[0].clone()
+                    
+                vis_mask = weights[0, :, 0] > 0
+                print(f"  Visible Points: {vis_mask.sum().item()} / {self.num_points}")
+                if vis_mask.sum() > 0:
+                    print(f"  Mean 2D: {points_2d[0][vis_mask].mean(dim=0).tolist()}")
+
         if debug_timer:
             print(f"PCA Tracker Timing:")
             print(f"  Transform: {(t1-t0)*1000:.3f} ms")
@@ -116,4 +154,4 @@ class PCATargetTracker:
             print(f"  PCA (3D):   {(t5-t4)*1000:.3f} ms")
             print(f"  Total:      {(t5-t0)*1000:.3f} ms")
         
-        return sigma_points, mean, eigvals, eigvecs, weights, points_2d, sigma_points_3d
+        return sigma_points, mean, eigvals, eigvecs, weights, points_2d, sigma_points_3d, is_valid

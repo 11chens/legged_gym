@@ -119,10 +119,14 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
             heading = [-0.3, 0.3]  # a residual heading plus theta
     
     class camera_sensor:
-        enable_camera = False  # if True, the image of isaacgym is enabled, otherwise it is disabled
-        fix_extrinsics = False  # if True, the camera extrinsics are fixed, otherwise they are randomized
-        fix_intrinsics = False  # if True, the camera intrinsics are fixed, otherwise they are randomized
-        fix_img_shape = False  # if True, the image shape is fixed, otherwise it is randomized
+        enable_camera = True  # if True, the image of isaacgym is enabled, otherwise it is disabled
+        save_debug_images = False # if True, save debug images to disk, otherwise view in real-time
+        vis_target_points = False # if True, visualize target points (green)
+        vis_sigma_3d = False # if True, visualize 3D sigma points (blue)
+        vis_sigma_2d = True # if True, visualize 2D sigma points (yellow)
+        fix_extrinsics = True  # if True, the camera extrinsics are fixed, otherwise they are randomized
+        fix_intrinsics = True  # if True, the camera intrinsics are fixed, otherwise they are randomized
+        fix_img_shape = True  # if True, the image shape is fixed, otherwise it is randomized
         clip_invalid = False # if True, the invalid image coordinates are clipped to -1, otherwise they are kept as is
         max_out_of_view_duration = 2.0 # [s] the duration to keep the out of view coordinates
         enable_out_of_view_drift = True # if True, add random walk drift when out of view
@@ -158,13 +162,13 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
 
             # Realsense D435i
             # 640x360, HFOV=70.26
-            img_width = 640
-            img_height = 360
+            # img_width = 640
+            # img_height = 360
             horizontal_fov = 70.26
-            fx = 454.768310546875  # fx = img_width / (2 * np.tan(np.deg2rad(horizontal_fov) / 2))
-            fy = 454.4901123046875
-            cx = 325.7699279785156
-            cy = 184.68618774414062
+            # fx = 454.768310546875  # fx = img_width / (2 * np.tan(np.deg2rad(horizontal_fov) / 2))
+            # fy = 454.4901123046875
+            # cx = 325.7699279785156
+            # cy = 184.68618774414062
 
 
             # 320*180

@@ -3,7 +3,7 @@ import numpy as np
 import cv2
 import os
 from isaacgym import gymapi
-from isaacgym.torch_utils import quat_apply
+from isaacgym.torch_utils import quat_apply, quat_rotate_inverse
 
 class VisualizationUtils:
     def __init__(self, env):
@@ -11,12 +11,31 @@ class VisualizationUtils:
         self.gym = env.gym
         self.viewer = env.viewer
         self.device = env.device
-        if hasattr(env, 'log_dir'):
+        if hasattr(env, 'log_dir') and env.log_dir is not None:
             self.save_dir = os.path.join(env.log_dir, "vis_frames")
         else:
             self.save_dir = os.path.join(os.getcwd(), "logs", "vis_frames")
         os.makedirs(self.save_dir, exist_ok=True)
         self.frame_idx = 0
+
+    def draw_sigma_axes(self, sigma_points, env_idx=0):
+        """
+        Draw the PCA sigma points as axes in 3D.
+        sigma_points: [5, 3] Tensor
+        """
+        if not self.viewer:
+            return
+            
+        p = sigma_points.cpu().numpy()
+        center, head, tail, side1, side2 = p[0], p[1], p[2], p[3], p[4]
+        
+        # Long Axis (Green)
+        self.gym.add_lines(self.viewer, self.env.envs[env_idx], 1, [center[0], center[1], center[2], head[0], head[1], head[2]], [0, 1, 0])
+        self.gym.add_lines(self.viewer, self.env.envs[env_idx], 1, [center[0], center[1], center[2], tail[0], tail[1], tail[2]], [0, 1, 0])
+        # Short Axis (Red)
+        self.gym.add_lines(self.viewer, self.env.envs[env_idx], 1, [center[0], center[1], center[2], side1[0], side1[1], side1[2]], [1, 0, 0])
+        self.gym.add_lines(self.viewer, self.env.envs[env_idx], 1, [center[0], center[1], center[2], side2[0], side2[1], side2[2]], [1, 0, 0])
+        
 
     def draw_3d_lines(self, points, color=[0, 1, 0], env_idx=0):
         """
@@ -43,61 +62,27 @@ class VisualizationUtils:
         """
         Project 3D points (in World Frame) to Image Plane.
         points_3d: [N, 3] Tensor in World Frame
-        camera_sensor: CameraSensor object
         """
-        # 1. Transform World -> Camera
-        # P_cam = R * (P_world - T_world)
-        # Note: CameraSensor stores R (Base->Cam) and T (Cam in Base).
-        # We need World->Cam.
-        # P_base = R_base_world * (P_world - T_base_world)
-        # P_cam = R_cam_base * (P_base - T_cam_base)
+        # 1. World -> Base
+        # Use pre-calculated base_quat and root_states from env
+        base_quat = self.env.base_quat[env_idx]
+        base_pos = self.env.root_states[env_idx, :3]
         
-        # Actually, let's look at how CameraSensor works or how we did it in legged_robot_nav.
-        # In legged_robot_nav, we had sigma_points_body (in Base Frame).
-        # And we used camera_sensor.R (Base->Cam) and T (Cam in Base).
+        points_base = quat_rotate_inverse(base_quat.unsqueeze(0).expand(len(points_3d), -1), points_3d - base_pos)
         
-        # So first, World -> Base
-        root_state = self.env.root_states[env_idx]
-        base_pos = root_state[:3]
-        base_quat = root_state[3:7]
+        # 2. Base -> Image
+        # Note: We cannot use camera_sensor.transform() directly because it expects batch_size=num_envs
+        # We manually apply the transform using the specific env's parameters
+        R = camera_sensor.R[env_idx]
+        T = camera_sensor.T[env_idx]
         
-        points_3d_env = points_3d # [N, 3]
+        # Base -> Camera: P_cam = R @ (P_base - T)
+        points_cam = (R @ (points_base - T).T).T
         
-        # P_body = R_world_base * (P_world - P_base)
-        # quat_rotate_inverse rotates by conjugate.
-        # base_quat is World->Base rotation? No, usually Base->World (orientation).
-        # So quat_rotate_inverse does World->Base.
-        
-        delta = points_3d_env - base_pos
-        # Expand quat for broadcasting
-        quat_expanded = base_quat.unsqueeze(0).expand(points_3d.shape[0], -1)
-        # If quat is Base->World, quat_apply is Base->World.
-        # We want World->Base. So we need inverse quat.
-        # quat_rotate_inverse is what we want.
-        from isaacgym.torch_utils import quat_rotate_inverse
-        points_body = quat_rotate_inverse(quat_expanded, delta)
-        
-        # 2. Base -> Camera
-        # P_cam = R * (P_body - T)
-        # R: [batch, 3, 3], T: [batch, 3]
-        R = camera_sensor.R[env_idx] # [3, 3]
-        T = camera_sensor.T[env_idx] # [3]
-        
-        delta_cam = points_body - T
-        # R @ delta_cam^T
-        points_cam = torch.matmul(R, delta_cam.T).T # [N, 3]
-        
-        # 3. Camera -> Image
-        x = points_cam[:, 0]
-        y = points_cam[:, 1]
-        z = points_cam[:, 2]
-        
+        # Camera -> Image
         def get_val(param, idx):
-            if isinstance(param, torch.Tensor):
-                if param.dim() > 0:
-                    return param[idx]
-                else:
-                    return param
+            if isinstance(param, torch.Tensor) and param.dim() > 0:
+                return param[idx]
             return param
 
         fx = get_val(camera_sensor.fx, env_idx)
@@ -105,107 +90,78 @@ class VisualizationUtils:
         cx = get_val(camera_sensor.cx, env_idx)
         cy = get_val(camera_sensor.cy, env_idx)
         
-        # Avoid div by zero (behind camera)
-        mask = z > 0.1
+        x, y, z = points_cam[:, 0], points_cam[:, 1], points_cam[:, 2]
         
         u = (x / z) * fx + cx
         v = (y / z) * fy + cy
         
-        return u, v, mask
+        return u, v, (z > 0.1)
 
-    def save_camera_debug_image(self, points_3d_dict, camera_sensor, env_idx=0, filename="debug_cam.png"):
+    def draw_2d_image(self, points_3d_dict, camera_sensor, env_idx=0, filename="debug_cam.png", save_images=False, points_2d_dict=None):
         """
-        Get camera image from Isaac Gym, overlay projected points, and save.
-        points_3d_dict: Dict of {"label": points_tensor}
+        Get camera image from Isaac Gym, overlay projected points, and save or display.
+        points_3d_dict: Dict of {"label": points_tensor_3d}
+        points_2d_dict: Dict of {"label": points_tensor_2d} (normalized [0, 1])
         """
-        # 1. Get Image from Isaac Gym
-        # We need to access the camera handle.
-        # In LeggedRobot, camera handles are usually stored.
-        # Let's assume self.env.cam_handles exists.
-        
         if not hasattr(self.env, 'cam_handles'):
-            print("No camera handles found.")
             return
 
         camera_handle = self.env.cam_handles[env_idx]
-        
-        # Retrieve image
-        # gym.get_camera_image returns numpy array
         image = self.gym.get_camera_image(self.env.sim, self.env.envs[env_idx], camera_handle, gymapi.IMAGE_COLOR)
         
-        # Reshape: [H, W, 4] (RGBA)
-        def get_val(param, idx):
-            if isinstance(param, torch.Tensor):
-                if param.dim() > 0:
-                    return param[idx].item()
-                else:
-                    return param.item()
-            return param
-
-        h = int(get_val(camera_sensor.img_height, env_idx))
-        w = int(get_val(camera_sensor.img_width, env_idx))
-        image = image.reshape(h, w, 4)
-        image = image[:, :, :3] # RGB
-        image = image.astype(np.uint8)
-        image = np.ascontiguousarray(image) # cv2 needs contiguous
-
-    def save_camera_debug_image(self, points_3d_dict, camera_sensor, env_idx=0, filename="debug_cam.png"):
-        """
-        Get camera image from Isaac Gym, overlay projected points, and save.
-        points_3d_dict: Dict of {"label": points_tensor}
-        """
-        # 1. Get Image from Isaac Gym
-        # We need to access the camera handle.
-        # In LeggedRobot, camera handles are usually stored.
-        # Let's assume self.env.camera_handles exists.
-        
-        if not hasattr(self.env, 'cam_handles'):
-            print("No camera handles found.")
-            return
-
-        camera_handle = self.env.cam_handles[env_idx]
-        
-        # Retrieve image
-        # gym.get_camera_image returns numpy array
-        image = self.gym.get_camera_image(self.env.sim, self.env.envs[env_idx], camera_handle, gymapi.IMAGE_COLOR)
-        
-        # Reshape: [H, W, 4] (RGBA)
-        # Use the fixed config dimensions used to create the camera, 
-        # because CameraSensor might have randomized dimensions.
         h = self.env.cfg.camera_sensor.intrinsics.img_height
         w = self.env.cfg.camera_sensor.intrinsics.img_width
         
         image = image.reshape(h, w, 4)
         image = image[:, :, :3] # RGB
         image = image.astype(np.uint8)
-        image = np.ascontiguousarray(image) # cv2 needs contiguous
+        image = np.ascontiguousarray(image)
         
-        # 2. Project and Draw Points
         colors = {
             "target": (0, 255, 0), # Green
             "sigma": (0, 0, 255),  # Red
+            "sigma_2d": (0, 255, 255), # Yellow
             "other": (255, 0, 0)   # Blue
         }
         
-        for label, points in points_3d_dict.items():
-            if points is None: continue
-            
-            u, v, mask = self.project_points_to_image(points, camera_sensor, env_idx)
-            
-            u = u.cpu().numpy()
-            v = v.cpu().numpy()
-            mask = mask.cpu().numpy()
-            
-            color = colors.get(label, (255, 255, 255))
-            
-            for i in range(len(u)):
-                if mask[i]:
-                    cv2.circle(image, (int(u[i]), int(v[i])), 3, color, -1)
-        
-        # 3. Save
-        # Convert RGB to BGR for OpenCV
+        # Draw 3D Points
+        if points_3d_dict:
+            for label, points in points_3d_dict.items():
+                if points is None: continue
+                u, v, mask = self.project_points_to_image(points, camera_sensor, env_idx)
+                u = u.cpu().numpy()
+                v = v.cpu().numpy()
+                mask = mask.cpu().numpy()
+                color = colors.get(label, (0, 255, 0))
+                for i in range(len(u)):
+                    if mask[i]:
+                        cv2.circle(image, (int(u[i]), int(v[i])), 3, color, -1)
+
+        # Draw 2D Points
+        if points_2d_dict:
+            for label, points in points_2d_dict.items():
+                if points is None: continue
+                if isinstance(points, torch.Tensor):
+                    pts = points.cpu().numpy()
+                else:
+                    pts = points
+                
+                color = colors.get(label, (255, 255, 0))
+                for i in range(len(pts)):
+                    u = int(pts[i, 0] * w)
+                    v = int(pts[i, 1] * h)
+                    if 0 <= u < w and 0 <= v < h:
+                        if i == 0:
+                            cv2.circle(image, (u, v), 2, color, 2)
+                        else:
+                            cv2.drawMarker(image, (u, v), color, markerType=cv2.MARKER_CROSS, markerSize=7, thickness=1)
+
         image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-        path = os.path.join(self.save_dir, filename)
-        cv2.imwrite(path, image)
-        # print(f"Saved debug image to {path}")
+        
+        if save_images:
+            path = os.path.join(self.save_dir, filename)
+            cv2.imwrite(path, image)
+        elif not self.env.headless:
+            cv2.imshow("Camera Debug", image)
+            cv2.waitKey(1)
 

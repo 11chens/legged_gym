@@ -47,6 +47,20 @@ def wrap_to_pi(angles):
     angles -= 2*np.pi * (angles > np.pi)
     return angles
 
+def quat_to_rot_matrix(q):
+    x, y, z, w = q[:, 0], q[:, 1], q[:, 2], q[:, 3]
+    x2, y2, z2 = x * x, y * y, z * z
+    xy, xz, yz = x * y, x * z, y * z
+    wx, wy, wz = w * x, w * y, w * z
+    
+    R = torch.stack([
+        1 - 2 * (y2 + z2), 2 * (xy - wz),     2 * (xz + wy),
+        2 * (xy + wz),     1 - 2 * (x2 + z2), 2 * (yz - wx),
+        2 * (xz - wy),     2 * (yz + wx),     1 - 2 * (x2 + y2)
+    ], dim=-1).reshape(-1, 3, 3)
+    return R
+
+
 # @ torch.jit.script
 def torch_rand_sqrt_float(lower, upper, shape, device):
     # type: (float, float, Tuple[int, int], str) -> Tensor

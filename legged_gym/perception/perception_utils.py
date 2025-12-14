@@ -108,7 +108,10 @@ def project_points(points_world, camera_params, camera_transform):
     
     points_2d = torch.stack([u_norm, v_norm], dim=-1) # [N, M, 2]
     
-    return points_2d
+    # Valid mask: Z > 0 (in front of camera)
+    valid_mask = Z > 1e-4
+    
+    return points_2d, valid_mask
 
 def compute_weighted_pca(points_2d, weights):
     """
@@ -122,9 +125,12 @@ def compute_weighted_pca(points_2d, weights):
         mean (Tensor): [num_envs, 2] Weighted mean (center)
         eigvals (Tensor): [num_envs, 2] Eigenvalues (ascending: short, long)
         eigvecs (Tensor): [num_envs, 2, 2] Eigenvectors (columns)
+        valid (Tensor): [num_envs] Boolean mask indicating if PCA is valid (sum_weights > 0)
     """
     # 1. Weighted Mean
     sum_weights = torch.sum(weights, dim=1) # [N, 1]
+    valid = (sum_weights > 1e-6).squeeze(-1)
+    
     sum_weights = torch.where(sum_weights < 1e-6, torch.ones_like(sum_weights), sum_weights) # Avoid div by zero
     
     mean = torch.sum(points_2d * weights, dim=1) / sum_weights # [N, 2]
@@ -142,7 +148,7 @@ def compute_weighted_pca(points_2d, weights):
     # eigh returns eigenvalues in ascending order
     L, V = torch.linalg.eigh(cov) 
     
-    return mean, L, V
+    return mean, L, V, valid
 
 def generate_sigma_points(mean, eigvals, eigvecs, alpha=2.0):
     """

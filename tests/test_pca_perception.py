@@ -122,7 +122,8 @@ def test_pca_pipeline():
                 camera_params=camera_params,
                 camera_transform=camera_transform,
                 use_geometric_weight=use_geo,
-                debug_timer=True
+                debug_timer=True,
+                debug_info=True
             )
             
             # Count visible points (weights > 0)

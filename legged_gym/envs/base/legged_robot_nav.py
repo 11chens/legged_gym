@@ -44,7 +44,7 @@ from typing import Tuple, Dict
 from legged_gym import LEGGED_GYM_ROOT_DIR
 from legged_gym.envs.base.base_task import BaseTask
 from legged_gym.utils.terrain import Terrain
-from legged_gym.utils.math import quat_apply_yaw, wrap_to_pi, torch_rand_sqrt_float, yaw_quat, cart2polar
+from legged_gym.utils.math import quat_apply_yaw, wrap_to_pi, torch_rand_sqrt_float, yaw_quat, cart2polar, quat_to_rot_matrix
 from legged_gym.utils.helpers import class_to_dict
 from legged_gym.envs.go2.go2_nav_config import Go2NavFlatCfg
 from .legged_robot import LeggedRobot
@@ -159,7 +159,9 @@ class LeggedRobotNav(LeggedRobot):
         self.perception_frame = self.target_cfg.perception.frame
         self.use_geometric_weight = self.target_cfg.perception.use_geometric_weight
         self.randomize_orientation = self.target_cfg.init.randomize_orientation
-        
+        self.debug_timer = self.target_cfg.perception.debug_timer
+        self.debug_info = self.target_cfg.perception.debug_info
+
         # Cache shape params for resampling
         self.shape_type = self.target_cfg.shape.type
         if self.shape_type == "cylinder" or self.shape_type == "sphere":
@@ -171,6 +173,10 @@ class LeggedRobotNav(LeggedRobot):
         self.enable_out_of_view_drift = self.cfg.camera_sensor.enable_out_of_view_drift
         self.drift_scale = self.cfg.camera_sensor.drift_scale
         self.max_out_of_view_duration = self.cfg.camera_sensor.max_out_of_view_duration
+        self.save_debug_images = self.cfg.camera_sensor.save_debug_images
+        self.vis_target_points = self.cfg.camera_sensor.vis_target_points
+        self.vis_sigma_3d = self.cfg.camera_sensor.vis_sigma_3d
+        self.vis_sigma_2d = self.cfg.camera_sensor.vis_sigma_2d
 
         # Pre-allocate tensors for resampling
         self.t_min_default = torch.ones((self.num_envs, 1), device=self.device) * 1.0
@@ -505,10 +511,16 @@ class LeggedRobotNav(LeggedRobot):
         pos_diff = self.object_pos - self.root_states[:, 0:3]
         self.goal_base = quat_rotate_inverse(self.base_quat, pos_diff)
 
-        # compute camera positions in world frame
+        # compute camera pose in world frame
         # self.camera_position.shape: torch.Size([3]), should be (num_envs, 3)
+        # TODO: fix, currently only works for fixed camera position
         self.camera_position_expanded = self.camera_position_scalar.unsqueeze(0).expand(self.num_envs, -1)
         self.camera_world = quat_apply(self.base_quat, self.camera_position_expanded) + self.root_states[:, 0:3]
+
+        R_base_to_world = quat_to_rot_matrix(self.base_quat) # [N, 3, 3]
+        R_base_to_cam = self.camera_sensor.R # [N, 3, 3]
+        # bmm: [N, 3, 3] @ [N, 3, 3]
+        self.R_world_to_cam = torch.bmm(R_base_to_cam, R_base_to_world.transpose(1, 2))
 
         # compute goal positions in camera frame and image plane
         self.P_camera, self.P_image = self.camera_sensor.transform(self.goal_base)
@@ -572,12 +584,9 @@ class LeggedRobotNav(LeggedRobot):
         self.period = (self.cfg.commands.period_s / self.dt)
         self.phase = ((self.episode_length_buf % self.period) / self.period).unsqueeze(-1)
     
-    def _resample_commands(self, env_ids):
+    def _resample_object_positions(self, env_ids):
         """ set the goal position in the visualable zone of the camera
         """
-        if len(env_ids) == 0:
-            return
-
         # 1. Sample u, v in Image Plane (Normalized [0, 1])
         u = torch.rand((len(env_ids), 1), device=self.device)
         v = torch.rand((len(env_ids), 1), device=self.device)
@@ -651,159 +660,162 @@ class LeggedRobotNav(LeggedRobot):
         
         # Use cached z_offset
         P_world[:, 2] = self.z_offset
-        
-        # Use cached randomize_orientation
-        if self.randomize_orientation:
-            # Random axis-angle
-            axis = torch.randn((len(env_ids), 3), device=self.device)
-            axis = axis / torch.norm(axis, dim=-1, keepdim=True)
-            angle = torch.rand((len(env_ids), 1), device=self.device) * 2 * np.pi
-            
-            # Axis-Angle to Quat
-            sin_a = torch.sin(angle / 2)
-            cos_a = torch.cos(angle / 2)
-            q = torch.cat([axis * sin_a, cos_a], dim=-1)
-            self.object_quat[env_ids] = q
-        else:
-            self.object_quat[env_ids, :] = 0.0
-            self.object_quat[env_ids, 3] = 1.0
 
-        # 7. Set object_pos
+        return P_world
+    
+    def _resample_object_orientations(self, env_ids):
+        """ set the goal orientation
+        """
+        if len(env_ids) == 0:
+            return
+        
+        # 1. Compute Yaw (Random or Fixed)
+        if self.randomize_orientation:
+            yaw = torch.rand((len(env_ids), 1), device=self.device) * 2 * np.pi
+        else:
+            yaw = torch.zeros((len(env_ids), 1), device=self.device)
+            
+        # 2. Convert to Quaternion (Rotation around Z)
+        sy = torch.sin(yaw * 0.5)
+        cy = torch.cos(yaw * 0.5)
+        q_yaw = torch.cat([torch.zeros_like(sy), torch.zeros_like(sy), sy, cy], dim=-1)
+        
+        # 3. Apply shape-specific base rotation (e.g. Cylinder needs to lie down)
+        q_final = q_yaw.clone()
+        
+        # Check for cylinder
+        is_cylinder = False
+        cylinder_mask = None
+        
+        if self.shape_type == "cylinder":
+            is_cylinder = True
+            cylinder_mask = slice(None)
+        elif self.shape_type == "mixed":
+            if "cylinder" in self.shape_types_list:
+                cyl_idx = self.shape_types_list.index("cylinder")
+                current_types = self.env_shape_type_indices[env_ids]
+                cylinder_mask = (current_types == cyl_idx)
+                if cylinder_mask.any():
+                    is_cylinder = True
+        
+        if is_cylinder:
+            # Rotate 90 deg around Y axis to make Z-axis cylinder lie along X-axis
+            val = np.sin(np.pi / 4)
+            q_lay = torch.tensor([0.0, val, 0.0, val], device=self.device, dtype=torch.float).view(1, 4)
+            
+            if self.shape_type == "cylinder":
+                q_final = quat_mul(q_yaw, q_lay.repeat(len(env_ids), 1))
+            elif self.shape_type == "mixed":
+                q_yaw_masked = q_yaw[cylinder_mask]
+                q_lay_masked = q_lay.repeat(q_yaw_masked.shape[0], 1)
+                q_final[cylinder_mask] = quat_mul(q_yaw_masked, q_lay_masked)
+
+        return q_final
+    
+    def _resample_commands(self, env_ids):
+        """ set the goal position in the visualable zone of the camera
+        """
+        if len(env_ids) == 0:
+            return
+        
+        # 1. Resample Object Position
+        P_world = self._resample_object_positions(env_ids)
+        # 2. Resample Object Orientation
+        q_final = self._resample_object_orientations(env_ids)
+
         self.object_pos[env_ids] = P_world
+        self.object_quat[env_ids] = q_final
+
+    def _compute_sigma_points_base(self, sigma_points_3d, base_pos, base_quat, is_valid):
+        """ Compute perception features (Sigma Points) in Robot Base Frame.
+        """
+        delta = sigma_points_3d - base_pos # [N, 5, 3]
+        sigma_points_base_flat = quat_rotate_inverse(base_quat.expand(-1, 5, -1).reshape(-1, 4), delta.reshape(-1, 3))
+        current_sigma_base = sigma_points_base_flat.view(self.num_envs, 5, 3)
+        
+        # If valid, update buffer. If invalid, set invalid data
+        valid_mask = is_valid.view(self.num_envs, 1, 1)
+        invalid_sigma = torch.ones_like(current_sigma_base) * -1.0
+        self.sigma_points_base = torch.where(valid_mask, current_sigma_base, invalid_sigma)
+
+    def _compute_sigma_points_camera(self):
+        """ Compute perception features (Sigma Points) in Camera Frame.
+        """
+        delta_cam = self.sigma_points_base - self.camera_sensor.T.unsqueeze(1)  # [N, 5, 3]
+        res = torch.bmm(self.camera_sensor.R, delta_cam.transpose(1, 2)) # [N, 3, 5]
+        self.sigma_points_camera = res.transpose(1, 2) # [N, 5, 3] (x, y, z)
+    
+    def _compute_sigma_points_image(self):
+        """ Compute perception features (Sigma Points) in Image Plane.
+        """
+        if not hasattr(self, 'sigma_points_camera'):
+            raise ValueError("Sigma Points in Camera Frame not computed yet.")
+        
+        x = self.sigma_points_camera[:, :, 0]
+        y = self.sigma_points_camera[:, :, 1]
+        z = self.sigma_points_camera[:, :, 2]
+        
+        # Avoid div by zero
+        z_safe = torch.where(z < 1e-5, torch.ones_like(z) * 1e-5, z)
+        
+        u = (x / z_safe) * self.cam_fx + self.cam_cx
+        v = (y / z_safe) * self.cam_fy + self.cam_cy
+        
+        # Normalize
+        u_norm = u / self.cam_img_w
+        v_norm = v / self.cam_img_h
+        
+        self.sigma_points_image = torch.stack([u_norm, v_norm, z], dim=-1) # [N, 5, 3]
 
     def _get_nav_commands(self):
         """ Compute perception features (Sigma Points) and update nav_commands.
         """
-        # 1. Run Perception Tracker
-        # Use cached params
-        
-        # Run Tracker (returns 2D and 3D features)
-        # We use 3D features for observation as requested
-        sigma_points_2d, _, _, _, _, _, sigma_points_3d = self.tracker.compute_features(
-            object_pos=self.object_pos,
-            object_quat=self.object_quat,
-            camera_params=self.camera_params_dict,
-            camera_transform=self.camera_transform_dict,
-            use_geometric_weight=self.use_geometric_weight
-        )
-        
-        # 2. Transform to Robot Base Frame
-        # sigma_points_3d: [N, 5, 3] in World Frame
         # Robot State: self.root_states [N, 13] (pos: 0-3, quat: 3-7)
         base_pos = self.root_states[:, :3].unsqueeze(1) # [N, 1, 3]
         base_quat = self.root_states[:, 3:7].unsqueeze(1) # [N, 1, 4]
+
+        # 1. Run Perception Tracker to get 3D Sigma Points in World Frame
+        camera_transform_world = {
+            'R': self.R_world_to_cam,
+            'T': self.camera_world
+        }
         
-        # P_base = R^T * (P_world - T)
-        delta = sigma_points_3d - base_pos # [N, 5, 3]
-        
-        # Flatten for quat_rotate_inverse
-        base_quat_flat = base_quat.expand(-1, 5, -1).reshape(-1, 4)
-        delta_flat = delta.reshape(-1, 3)
-        
-        sigma_points_base_flat = quat_rotate_inverse(base_quat_flat, delta_flat)
-        self.sigma_points_base = sigma_points_base_flat.view(self.num_envs, 5, 3)
-        
-        # Transform to Configured Frame
-        frame = self.perception_frame
-        if frame == "base":
+        # sigma_points_2d: [N, 5, 2] in Image Plane
+        # sigma_points_3d: [N, 5, 3] in World Frame
+        # is_valid: [N]
+        sigma_points_2d, _, _, _, _, _, sigma_points_3d, is_valid = self.tracker.compute_features(
+            object_pos=self.object_pos,
+            object_quat=self.object_quat,
+            camera_params=self.camera_params_dict,
+            camera_transform=camera_transform_world,
+            use_geometric_weight=self.use_geometric_weight,
+            debug_timer=self.debug_timer,
+            debug_info=self.debug_info
+        )
+
+        self._compute_sigma_points_base(sigma_points_3d, base_pos, base_quat, is_valid)
+ 
+        # 2. Transform to Configured Frame
+        if self.perception_frame == "base":
+            self._compute_sigma_points_base(sigma_points_3d, base_pos, base_quat, is_valid)
             self.sigma_points_obs = self.sigma_points_base
-        elif frame == "camera":
-            # P_cam = R * (P_base - T)
-            # T: [N, 3] -> [N, 1, 3]
-            T = self.camera_sensor.T.unsqueeze(1)
-            # R: [N, 3, 3]
-            R = self.camera_sensor.R
-            
-            delta_cam = self.sigma_points_base - T
-            # delta_cam: [N, 5, 3]
-            # R @ delta_cam^T
-            # [N, 3, 3] @ [N, 3, 5] -> [N, 3, 5]
-            res = torch.bmm(R, delta_cam.transpose(1, 2))
-            self.sigma_points_obs = res.transpose(1, 2) # [N, 5, 3]
-            
-        elif frame == "image":
-            # P_cam first
-            T = self.camera_sensor.T.unsqueeze(1)
-            R = self.camera_sensor.R
-            delta_cam = self.sigma_points_base - T
-            res = torch.bmm(R, delta_cam.transpose(1, 2))
-            P_cam = res.transpose(1, 2) # [N, 5, 3] (x, y, z)
-            
-            # Project to Image (u, v, z)
-            # u = (x/z) * fx + cx
-            # v = (y/z) * fy + cy
-            x = P_cam[:, :, 0]
-            y = P_cam[:, :, 1]
-            z = P_cam[:, :, 2]
-            
-            # Avoid div by zero
-            z_safe = torch.where(z < 1e-5, torch.ones_like(z) * 1e-5, z)
-            
-            # Use cached tensors
-            fx = self.cam_fx
-            fy = self.cam_fy
-            cx = self.cam_cx
-            cy = self.cam_cy
-            img_w = self.cam_img_w
-            img_h = self.cam_img_h
-            
-            u = (x / z_safe) * fx + cx
-            v = (y / z_safe) * fy + cy
-            
-            # Normalize
-            u_norm = u / img_w
-            v_norm = v / img_h
-            
-            self.sigma_points_obs = torch.stack([u_norm, v_norm, z], dim=-1) # [N, 5, 3]
+        elif self.perception_frame == "camera":
+            self._compute_sigma_points_camera()
+            self.sigma_points_obs = self.sigma_points_camera
+        elif self.perception_frame == "image":
+            self._compute_sigma_points_camera()
+            self._compute_sigma_points_image()
+            self.sigma_points_obs = self.sigma_points_image
         else:
-            raise ValueError(f"Unknown perception frame: {frame}")
+            raise ValueError(f"Unknown perception frame: {self.perception_frame}")
 
-        # Out of View Logic (Drift & Masking)
-        if self.enable_out_of_view_drift:
-            # 1. Update Drift for Out of View Envs
-            # Drift is random walk: N(0, scale)
-            # self.sigma_drift: [N, 5, 3]
-            
-            # Only update drift for those physically out of view
-            if self.physically_out_of_view.any():
-                drift_step = torch.randn_like(self.sigma_drift[self.physically_out_of_view]) * self.drift_scale
-                self.sigma_drift[self.physically_out_of_view] += drift_step
-            
-            # Reset drift for those in view
-            self.sigma_drift[~self.physically_out_of_view] = 0.0
-            
-            # 2. Apply Drift
-            # If in view: obs = GT
-            # If out of view: obs = last_valid + drift
-            
-            # Update last_valid for those in view
-            self.last_valid_sigma_points[~self.physically_out_of_view] = self.sigma_points_obs[~self.physically_out_of_view]
-            
-            # Construct final obs
-            # Start with GT (for in-view)
-            final_obs = self.sigma_points_obs.clone()
-            
-            # Overwrite out-of-view with drifted last valid
-            if self.physically_out_of_view.any():
-                final_obs[self.physically_out_of_view] = self.last_valid_sigma_points[self.physically_out_of_view] + self.sigma_drift[self.physically_out_of_view]
-            
-            self.sigma_points_obs = final_obs
-
-        # 3. Apply Masking (Timeout)
-        # If out_of_view_timer > threshold, set to -1
-        # self.out_of_view is boolean mask calculated in post_physics_step
-        if self.out_of_view.any():
-             self.sigma_points_obs[self.out_of_view] = -1.0
-
-        # 4. Update nav_commands (15 dims)
+        # 3. Update nav_commands (15 dims)
         # [p_center, p_head, p_tail, p_side1, p_side2]
         self.nav_commands = self.sigma_points_obs.reshape(self.num_envs, 15)
         
-        # Debug Visualization
         self.sigma_points_3d = sigma_points_3d
         self.sigma_points_2d = sigma_points_2d
-        if self.debug_viz:
-            self._draw_debug_vis()
+
 
     def _draw_debug_vis(self, sigma_points_3d=None, sigma_points_2d=None):
         """ Draw Sigma Points in 3D and 2D """
@@ -813,58 +825,66 @@ class LeggedRobotNav(LeggedRobot):
             else:
                 return
         
+        if sigma_points_2d is None:
+            if hasattr(self, 'sigma_points_2d'):
+                sigma_points_2d = self.sigma_points_2d
+        
         if self.viewer:
             self.gym.clear_lines(self.viewer)
             
-            # 1. Draw Sigma Points (Env 0)
-            # p = sigma_points_3d[0] # [5, 3]
-            # self.vis_utils.draw_3d_lines(p, color=[0, 1, 0], env_idx=0)
-            # Draw axes manually as before for better visualization of structure
-            p = sigma_points_3d[0].cpu().numpy()
-            center, head, tail, side1, side2 = p[0], p[1], p[2], p[3], p[4]
-            
-            # Long Axis (Green)
-            self.gym.add_lines(self.viewer, self.envs[0], 1, [center[0], center[1], center[2], head[0], head[1], head[2]], [0, 1, 0])
-            self.gym.add_lines(self.viewer, self.envs[0], 1, [center[0], center[1], center[2], tail[0], tail[1], tail[2]], [0, 1, 0])
-            # Short Axis (Red)
-            self.gym.add_lines(self.viewer, self.envs[0], 1, [center[0], center[1], center[2], side1[0], side1[1], side1[2]], [1, 0, 0])
-            self.gym.add_lines(self.viewer, self.envs[0], 1, [center[0], center[1], center[2], side2[0], side2[1], side2[2]], [1, 0, 0])
+            # 1. Draw sigma points axes (Env 0)
+            self.vis_utils.draw_sigma_axes(
+                sigma_points=sigma_points_3d[0], 
+                env_idx=0
+            )
 
-            # 2. Sample and Draw Target Object Points (Env 0)
-            target_cfg = self.cfg.target
+            # 2. Sample and Draw target points using cross markers (Env 0)
             if self.env_shape_type_indices is not None:
                 type_idx = self.env_shape_type_indices[0].item()
                 shape_type = self.shape_types_list[type_idx]
             else:
-                shape_type = target_cfg.shape.type
+                shape_type = self.cfg.target.shape.type
 
             if shape_type == "cylinder":
                 shape = Cylinder(device=self.device)
-                params = torch.tensor([target_cfg.shape.radius, target_cfg.shape.height], device=self.device).unsqueeze(0)
+                params = torch.tensor([self.cfg.target.shape.radius, self.cfg.target.shape.height], device=self.device).unsqueeze(0)
             elif shape_type == "cuboid":
                 shape = Cuboid(device=self.device)
-                params = torch.tensor([target_cfg.shape.dims], device=self.device)
+                params = torch.tensor([self.cfg.target.shape.dims], device=self.device)
             elif shape_type == "sphere":
                 shape = Sphere(device=self.device)
-                params = torch.tensor([target_cfg.shape.radius], device=self.device).unsqueeze(0)
+                params = torch.tensor([self.cfg.target.shape.radius], device=self.device).unsqueeze(0)
             
             points_local, _ = shape.sample_surface(num_points=100, num_envs=1, params=params)
             points_local = points_local[0]
             
-            pos = self.object_pos[0]
-            quat = self.object_quat[0]
-            points_world = quat_apply(quat.unsqueeze(0).expand(100, -1), points_local) + pos
+            points_world = quat_apply(self.object_quat[0].unsqueeze(0).expand(points_local.shape[0], -1), points_local) + self.object_pos[0]
             
-            # Draw in 3D
+            # Draw target points using cross markers
             self.vis_utils.draw_3d_lines(points_world, color=[0, 0, 1], env_idx=0)
             
-            # 3. Project to Camera Image (if enabled)
+            # 3. Project to camera image plane and Draw
             if self.enable_camera and self.common_step_counter % 10 == 0:
-                points_dict = {
-                    "target": points_world,
-                    "sigma": sigma_points_3d[0]
-                }
-                self.vis_utils.save_camera_debug_image(points_dict, self.camera_sensor, env_idx=0, filename=f"debug_cam_{self.common_step_counter}.png")
+                points_dict = {}
+                if self.vis_target_points:
+                    points_dict["target"] = points_world
+                if self.vis_sigma_3d:
+                    points_dict["sigma"] = sigma_points_3d[0]
+                
+                points_2d_dict = {}
+                if self.vis_sigma_2d and sigma_points_2d is not None:
+                    points_2d_dict = {
+                        "sigma_2d": sigma_points_2d[0]
+                    }
+                
+                self.vis_utils.draw_2d_image(
+                    points_3d_dict=points_dict, 
+                    camera_sensor=self.camera_sensor, 
+                    env_idx=0, 
+                    filename=f"debug_cam_{self.common_step_counter}.png",
+                    save_images=self.save_debug_images,
+                    points_2d_dict=points_2d_dict
+                )
 
     
     def _get_camera_noise_vec(self):
@@ -1099,8 +1119,9 @@ class LeggedRobotNav(LeggedRobot):
         camera_props = gymapi.CameraProperties()
         camera_props.enable_tensors = True
         camera_props.width = self.cfg.camera_sensor.intrinsics.img_width
-        camera_props.height = self.cfg.camera_sensor.intrinsics.img_height
+        camera_props.height = self.cfg.camera_sensor.intrinsics.img_height        
         camera_props.horizontal_fov = self.cfg.camera_sensor.intrinsics.horizontal_fov
+        
         camera_handle = self.gym.create_camera_sensor(
             env_handle, camera_props)
         root_handle = self.gym.get_actor_root_rigid_body_handle(
@@ -1108,7 +1129,7 @@ class LeggedRobotNav(LeggedRobot):
         local_transform = gymapi.Transform()
         local_transform.p = gymapi.Vec3(*self.camera_position_scalar)
         local_transform.r = gymapi.Quat.from_euler_zyx(
-            np.radians(-self.camera_angle[0]), -np.radians(self.camera_angle[1]), -np.radians(self.camera_angle[2]))
+            np.radians(self.camera_angle[0]), np.radians(self.camera_angle[1]), np.radians(self.camera_angle[2]))
 
         self.gym.attach_camera_to_body(
             camera_handle, env_handle, root_handle, local_transform, gymapi.FOLLOW_TRANSFORM)

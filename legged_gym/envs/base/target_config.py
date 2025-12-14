@@ -15,6 +15,8 @@ class TargetCfg:
         num_sample_points = 1000
         frame = "base" # "base", "camera", "image"
         use_geometric_weight = True
+        debug_timer = False
+        debug_info = False
         
     class init:
         # Randomization ranges
