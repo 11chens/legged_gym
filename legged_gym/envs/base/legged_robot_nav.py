@@ -74,74 +74,37 @@ class LeggedRobotNav(LeggedRobot):
         # Initialize Perception Tracker
         target_cfg = self.cfg.target
         
+        # Pre-instantiate shapes
+        self.shapes = {
+            "cylinder": Cylinder(self.device),
+            "cuboid": Cuboid(self.device),
+            "sphere": Sphere(self.device)
+        }
+        
+        self.object_dims = torch.zeros(self.num_envs, 3, device=self.device)
+        self.local_points = torch.zeros(self.num_envs, target_cfg.perception.num_sample_points, 3, device=self.device)
+        self.local_normals = torch.zeros(self.num_envs, target_cfg.perception.num_sample_points, 3, device=self.device)
+        
         if target_cfg.shape.type == "mixed":
-            # Randomly assign shapes
-            types = target_cfg.shape.types
-            
-            # We need to sample points for each env
-            local_points = torch.zeros(self.num_envs, target_cfg.perception.num_sample_points, 3, device=self.device)
-            local_normals = torch.zeros(self.num_envs, target_cfg.perception.num_sample_points, 3, device=self.device)
-            
-            # Pre-instantiate shapes
-            shapes = {
-                "cylinder": Cylinder(self.device),
-                "cuboid": Cuboid(self.device),
-                "sphere": Sphere(self.device)
-            }
-            
-            # Params
-            params_cylinder = torch.tensor([target_cfg.shape.radius, target_cfg.shape.height], device=self.device).unsqueeze(0)
-            params_cuboid = torch.tensor([target_cfg.shape.dims], device=self.device)
-            params_sphere = torch.tensor([target_cfg.shape.radius], device=self.device).unsqueeze(0)
-            
-            # Generate random indices
-            type_indices = torch.randint(0, len(types), (self.num_envs,), device=self.device)
-            self.env_shape_type_indices = type_indices # Store for viz
-            self.shape_types_list = types
-            
-            for i, type_name in enumerate(types):
-                mask = (type_indices == i)
-                if not mask.any():
-                    continue
-                
-                count = mask.sum().item()
-                shape = shapes[type_name]
-                
-                if type_name == "cylinder":
-                    p = params_cylinder.repeat(count, 1)
-                elif type_name == "cuboid":
-                    p = params_cuboid.repeat(count, 1)
-                elif type_name == "sphere":
-                    p = params_sphere.repeat(count, 1)
-                
-                pts, nrms = shape.sample_surface(target_cfg.perception.num_sample_points, count, p)
-                local_points[mask] = pts
-                local_normals[mask] = nrms
-            
-            self.tracker = PCATargetTracker(
-                shape_type="mixed",
-                shape_params=torch.zeros(1, device=self.device), # Dummy
-                num_envs=self.num_envs,
-                device=self.device,
-                num_sample_points=target_cfg.perception.num_sample_points,
-                local_points=local_points,
-                local_normals=local_normals
-            )
+            self.shape_types_list = target_cfg.shape.types
+            self.env_shape_type_indices = torch.randint(0, len(self.shape_types_list), (self.num_envs,), device=self.device)
         else:
-            self.env_shape_type_indices = None
-            shape_params = torch.tensor([target_cfg.shape.radius, target_cfg.shape.height], device=self.device).unsqueeze(0)
-            if target_cfg.shape.type == "cuboid":
-                 shape_params = torch.tensor([target_cfg.shape.dims], device=self.device)
-            elif target_cfg.shape.type == "sphere":
-                 shape_params = torch.tensor([target_cfg.shape.radius], device=self.device).unsqueeze(0)
-            
-            self.tracker = PCATargetTracker(
-                shape_type=target_cfg.shape.type,
-                shape_params=shape_params,
-                num_envs=self.num_envs,
-                device=self.device,
-                num_sample_points=target_cfg.perception.num_sample_points
-            )
+            self.shape_types_list = [target_cfg.shape.type]
+            self.env_shape_type_indices = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+
+        # Randomize props for all envs
+        self._randomize_object_props(torch.arange(self.num_envs, device=self.device))
+        
+        self.tracker = PCATargetTracker(
+            shape_type="mixed", # We handle everything as mixed/custom now
+            shape_params=torch.zeros(1, device=self.device), # Dummy
+            num_envs=self.num_envs,
+            device=self.device,
+            num_sample_points=target_cfg.perception.num_sample_points,
+            local_points=self.local_points,
+            local_normals=self.local_normals,
+            object_dims=self.object_dims
+        )
         
         # Object State
         self.object_pos = torch.zeros(self.num_envs, 3, device=self.device)
@@ -200,6 +163,12 @@ class LeggedRobotNav(LeggedRobot):
         self.cam_img_w = to_tensor(self.camera_sensor.img_width)
         self.cam_img_h = to_tensor(self.camera_sensor.img_height)
 
+        self.x_axis_local = torch.tensor([1.0, 0.0, 0.0], device=self.device).repeat(self.num_envs, 1)
+        self.y_axis_local = torch.tensor([0.0, 1.0, 0.0], device=self.device).repeat(self.num_envs, 1)
+        self.z_axis_local = torch.tensor([0.0, 0.0, 1.0], device=self.device).repeat(self.num_envs, 1)
+
+        self.gripper_width = 0.08
+
         # Cache camera params dicts for tracker
         self.camera_params_dict = {
             'fx': self.camera_sensor.fx,
@@ -225,7 +194,7 @@ class LeggedRobotNav(LeggedRobot):
         self.P_base = torch.zeros(self.num_envs, self.cfg.env.num_position, dtype=torch.float, device=self.device, requires_grad=False)
         self.distance = torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
         self.objct_z = torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
-        self.target_moved = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device, requires_grad=False)
+        self.object_moved = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device, requires_grad=False)
         self.out_of_view_timer = torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
         self.out_of_view_drift = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device, requires_grad=False)
         
@@ -254,7 +223,6 @@ class LeggedRobotNav(LeggedRobot):
                 self.num_envs, 47, device=self.device, dtype=torch.float)
         self.loco_obs_hist = torch.zeros(
                 self.num_envs, 10, 47, device=self.device, dtype=torch.float)  
-        self.phase = torch.zeros(self.num_envs, 1, dtype=torch.float, device=self.device, requires_grad=False)
         self.rand_delay_time_ms = torch.randint_like(self.episode_length_buf, low=self.cfg.commands.min_delay_time_ms, high=self.cfg.commands.max_delay_time_ms)
 
         self.camera_noise_vec = self._get_camera_noise_vec()
@@ -366,7 +334,7 @@ class LeggedRobotNav(LeggedRobot):
         self.last_dof_vel[env_ids] = 0.
         self.last_root_vel[env_ids] = 0.
         self.episode_length_buf[env_ids] = 0
-        self.target_moved[env_ids] = False
+        self.object_moved[env_ids] = False
         self.out_of_view_timer[env_ids] = 0.
         self.out_of_view_drift[env_ids] = 0.
         self.loco_obs_hist[env_ids, :, :] = 0.
@@ -488,57 +456,28 @@ class LeggedRobotNav(LeggedRobot):
         self.reset_buf = torch.any(torch.norm(self.contact_forces[:, self.termination_contact_indices, :], dim=-1) > 1., dim=1)
         self.time_out_buf = self.episode_length_buf > self.max_episode_length # no terminal reward for time-outs
         self.reset_buf |= self.time_out_buf
-        # self.reset_buf |= (self.out_of_view * self.reach_goal)
         self.reset_buf |= self.reach_goal
 
-    def _post_physics_step_callback(self):
-        """ origin: resample_cmds[env_ids] at resampling_time
-            new: update nav_commands every step
+    def _compute_object_center_map(self):
+        """ Compute the object center in base frame, camera frame and image plane
+            Check if out of view, and apply out-of-view drift if enabled
         """
-        # Resample target once per episode when in range [0.5, 1.0]
-        in_range = (self.distance > 0.5) & (self.distance < 1.0)
-        to_move = in_range & (~self.target_moved)
-        env_ids_resample = to_move.nonzero(as_tuple=False).flatten()
-        if len(env_ids_resample) > 0:
-            self._resample_commands(env_ids_resample)
-            self.target_moved[env_ids_resample] = True
-
-        # update distance and reach_goal
-        self.distance = torch.norm(self.root_states[:, :2] - self.object_pos[:, :2], dim=1)
-        self.reach_goal = self.distance < (self.sigma)
-
         # pos in world -> pos in robot
         pos_diff = self.object_pos - self.root_states[:, 0:3]
         self.P_base = quat_rotate_inverse(self.base_quat, pos_diff)
-
-        # compute camera pose in world frame
-        # self.camera_position.shape: torch.Size([3]), should be (num_envs, 3)
-        # TODO: fix, currently only works for fixed camera position
-        self.camera_position_expanded = self.camera_position_scalar.unsqueeze(0).expand(self.num_envs, -1)
-        self.camera_world = quat_apply(self.base_quat, self.camera_position_expanded) + self.root_states[:, 0:3]
-
-        R_base_to_world = quat_to_rot_matrix(self.base_quat) # [N, 3, 3]
-        R_base_to_cam = self.camera_sensor.R # [N, 3, 3]
-        # bmm: [N, 3, 3] @ [N, 3, 3]
-        self.R_world_to_cam = torch.bmm(R_base_to_cam, R_base_to_world.transpose(1, 2))
-
         # compute goal positions in camera frame and image plane
         self.P_camera, self.P_image = self.camera_sensor.transform(self.P_base)
-        
+
         # Check if physically out of view
-        u = self.P_image[:, 0]
-        v = self.P_image[:, 1]
-        z = self.P_camera[:, 2]
-        
-        behind_camera = z <= 0
-        out_of_bounds = (u < 0) | (u > 1) | (v < 0) | (v > 1)
+        behind_camera = self.P_camera[:, 2] <= 0 # z <= 0
+        out_of_bounds = (self.P_image[:, 0] < 0) | (self.P_image[:, 0] > 1) | (self.P_image[:, 1] < 0) | (self.P_image[:, 1] > 1)
         self.physically_out_of_view = behind_camera | out_of_bounds
         
         # Update timer
         self.out_of_view_timer[self.physically_out_of_view] += self.dt
         self.out_of_view_timer[~self.physically_out_of_view] = 0.0
         
-        if self.cfg.camera_sensor.enable_out_of_view_drift:
+        if self.enable_out_of_view_drift:
             # Reset drift for those in view
             self.out_of_view_drift[~self.physically_out_of_view] = 0.0
             
@@ -549,23 +488,96 @@ class LeggedRobotNav(LeggedRobot):
             
             # Apply drift to P_image
             self.P_image += self.out_of_view_drift
-
+            
         # Determine if we should mask it (return -1)
-        threshold = self.cfg.camera_sensor.max_out_of_view_duration
-        should_mask = behind_camera | (self.out_of_view_timer > threshold)
-        
-        self.out_of_view = should_mask
-        
+        threshold = self.cfg.camera_sensor.max_out_of_view_duration if self.enable_out_of_view_drift else 0.0
+        should_invalid_mask = behind_camera | (self.out_of_view_timer > threshold)
+                
         # Apply mask
-        self.P_image[should_mask] = -1
+        self.P_image[should_invalid_mask] = -1
         
-        self.depth = torch.where(
-            self.out_of_view,
+        self.depth_in_view = torch.where(
+            should_invalid_mask,
             torch.ones_like(self.P_camera[:, -1]) * -1,  # set to -1 if out of view
             self.P_camera[:, -1].clip(min=0.1)
         )
+    
+    def _compute_camera_pose_in_world(self):
+        """ compute camera pose in world frame
+        """
+        # compute camera pose in world frame
+        # self.camera_position.shape: torch.Size([3]), should be (num_envs, 3)
+        # TODO: fix, currently only works for fixed camera position
+        self.camera_position_expanded = self.camera_position_scalar.unsqueeze(0).expand(self.num_envs, -1)
+        self.camera_world = quat_apply(self.base_quat, self.camera_position_expanded) + self.root_states[:, 0:3]
+        R_base_to_world = quat_to_rot_matrix(self.base_quat) # [N, 3, 3]
+        R_base_to_cam = self.camera_sensor.R # [N, 3, 3]
+        self.R_world_to_cam = torch.bmm(R_base_to_cam, R_base_to_world.transpose(1, 2))
+        self.camera_transform_world = {
+            'R': self.R_world_to_cam,
+            'T': self.camera_world
+        }
+    
+    def resample_object_pose_on_the_way(self):
+        """ Resample object pose once per episode when in specified range
+        """
+        in_range = (self.distance > 0.5) & (self.distance < 1.0)
+        to_move = in_range & (~self.object_moved)
+        env_ids_resample = to_move.nonzero(as_tuple=False).flatten()
+        if len(env_ids_resample) > 0:
+            self._resample_commands(env_ids_resample, on_the_way=True)
+            self.object_moved[env_ids_resample] = True
+    
+    def _compute_long_end_points_in_world(self):
+        """ Compute the long axis endpoints (head & tail) in world frame
+        """
+        # Find the index of the longest dimension
+        # dims: [N, 3]
+        dims = self.tracker.object_dims
+        max_dim_vals, max_dim_inds = torch.max(dims, dim=1) # [N], [N]
+        
+        # Select the corresponding axis vector
+        # We have x_axis_world, y_axis_world, z_axis_world: [N, 3]
+        # Stack them: [N, 3, 3]
+        all_axes = torch.stack([self.x_axis_world, self.y_axis_world, self.z_axis_world], dim=1)
+        
+        # Gather the axis corresponding to max_dim_inds
+        # Create batch indices
+        batch_indices = torch.arange(self.num_envs, device=self.device)
+        self.axis_long_world = all_axes[batch_indices, max_dim_inds] # [N, 3]
+        
+        half_length = (max_dim_vals / 2.0).unsqueeze(-1)
+        self.p_head_world = self.object_pos + self.axis_long_world * half_length
+        self.p_tail_world = self.object_pos - self.axis_long_world * half_length
+                    
+        # Determine if object is too long (Check Max Dimension)
+        self.obj_is_too_long = (max_dim_vals > self.gripper_width)
 
-        self._get_nav_commands()
+    def _post_physics_step_callback(self):
+        """ origin: resample_cmds[env_ids] at resampling_time
+            new: update nav_commands every step
+        """
+        if self.cfg.commands.resample_on_the_way:
+            self.resample_object_pose_on_the_way()
+
+        # update distance and reach_goal
+        self.distance = torch.norm(self.root_states[:, :2] - self.object_pos[:, :2], dim=1)
+        self.reach_goal = self.distance < (self.sigma)
+
+        # get self.forward_world, self.x_axis_world, self.y_axis_world, self.z_axis_world
+        self._compute_robot_object_directions()
+
+        # get self.camera_transform_world('R': self.R_world_to_cam, 'T': self.camera_world)
+        self._compute_camera_pose_in_world()
+
+        # map object center to image plane and get depth_in_view
+        self._compute_object_center_map()
+
+        # get long end points of object in world frame (self.p_head_world, self.p_tail_world)
+        self._compute_long_end_points_in_world() # nontrivial
+
+        # get self.sigma_points_3d, self.sigma_points_base, self.sigma_points_2d, self.is_valid for perception in obs
+        self._get_nav_commands() # nontrivial
 
         self.nav_actions_buffer = torch.where(
             (self.episode_length_buf <= 1)[:, None, None],
@@ -578,12 +590,60 @@ class LeggedRobotNav(LeggedRobot):
 
         self.timer = (self.episode_length_buf / self.max_episode_length).unsqueeze(-1)
     
-    def _update_phase(self):
-        """ update timing-command phase
-        """
-        self.period = (self.cfg.commands.period_s / self.dt)
-        self.phase = ((self.episode_length_buf % self.period) / self.period).unsqueeze(-1)
-    
+    def _randomize_object_props(self, env_ids):
+        if len(env_ids) == 0:
+            return
+
+        target_cfg = self.cfg.target
+        
+        # 1. Determine Shape Types
+        if target_cfg.shape.type == "mixed":
+            type_indices = torch.randint(0, len(self.shape_types_list), (len(env_ids),), device=self.device)
+            self.env_shape_type_indices[env_ids] = type_indices
+        
+        # 2. Iterate over types
+        for i, type_name in enumerate(self.shape_types_list):
+            subset_indices = self.env_shape_type_indices[env_ids]
+            mask = (subset_indices == i)
+            
+            if not mask.any():
+                continue
+            
+            count = mask.sum().item()
+            
+            # Generate random params
+            if type_name == "cylinder":
+                r = torch_rand_float(target_cfg.shape.radius_range[0], target_cfg.shape.radius_range[1], (count, 1), device=self.device)
+                h = torch_rand_float(target_cfg.shape.height_range[0], target_cfg.shape.height_range[1], (count, 1), device=self.device)
+                params = torch.cat([r, h], dim=1)
+            elif type_name == "cuboid":
+                x = torch_rand_float(target_cfg.shape.dims_range[0][0], target_cfg.shape.dims_range[0][1], (count, 1), device=self.device)
+                y = torch_rand_float(target_cfg.shape.dims_range[1][0], target_cfg.shape.dims_range[1][1], (count, 1), device=self.device)
+                z = torch_rand_float(target_cfg.shape.dims_range[2][0], target_cfg.shape.dims_range[2][1], (count, 1), device=self.device)
+                params = torch.cat([x, y, z], dim=1)
+            elif type_name == "sphere":
+                r = torch_rand_float(target_cfg.shape.radius_range[0], target_cfg.shape.radius_range[1], (count, 1), device=self.device)
+                params = r
+            
+            # Compute dims
+            dims = PCATargetTracker.compute_object_dims(type_name, params, self.device)
+            
+            # Sample points
+            shape = self.shapes[type_name]
+            pts, nrms = shape.sample_surface(target_cfg.perception.num_sample_points, count, params)
+            
+            # Update buffers
+            global_indices = env_ids[mask]
+            self.object_dims[global_indices] = dims
+            self.local_points[global_indices] = pts
+            self.local_normals[global_indices] = nrms
+            
+        # Update tracker if it exists
+        if hasattr(self, 'tracker'):
+            self.tracker.object_dims[env_ids] = self.object_dims[env_ids]
+            self.tracker.local_points[env_ids] = self.local_points[env_ids]
+            self.tracker.local_normals[env_ids] = self.local_normals[env_ids]
+
     def _resample_object_positions(self, env_ids):
         """ set the goal position in the visualable zone of the camera
         """
@@ -712,11 +772,15 @@ class LeggedRobotNav(LeggedRobot):
 
         return q_final
     
-    def _resample_commands(self, env_ids):
+    def _resample_commands(self, env_ids, on_the_way=False):
         """ set the goal position in the visualable zone of the camera
         """
         if len(env_ids) == 0:
             return
+        
+        if not on_the_way:
+            # Randomize Object Properties (Dims, Points)
+            self._randomize_object_props(env_ids)
         
         # 1. Resample Object Position
         P_world = self._resample_object_positions(env_ids)
@@ -725,7 +789,22 @@ class LeggedRobotNav(LeggedRobot):
 
         self.object_pos[env_ids] = P_world
         self.object_quat[env_ids] = q_final
-
+    
+    def _compute_robot_object_directions(self):
+        """ Compute robot forward vector and object axes in world frame.
+        """
+        # Robot forward vector in world frame
+        self.forward_world = quat_apply(self.base_quat, self.forward_vec)
+        # Object axes in world frame
+        self.x_axis_world = quat_apply(self.object_quat, self.x_axis_local)
+        self.y_axis_world = quat_apply(self.object_quat, self.y_axis_local)
+        self.z_axis_world = quat_apply(self.object_quat, self.z_axis_local)
+        
+        # Compute Head and Tail Points (Endpoints along X-axis)
+        half_length = (self.tracker.object_dims[:, 0] / 2.0).unsqueeze(-1)
+        self.p_head_world = self.object_pos + self.x_axis_world * half_length
+        self.p_tail_world = self.object_pos - self.x_axis_world * half_length
+        
     def _compute_sigma_points_base(self, sigma_points_3d, base_pos, base_quat, is_valid):
         """ Compute perception features (Sigma Points) in Robot Base Frame.
         """
@@ -775,19 +854,14 @@ class LeggedRobotNav(LeggedRobot):
         base_quat = self.root_states[:, 3:7].unsqueeze(1) # [N, 1, 4]
 
         # 1. Run Perception Tracker to get 3D Sigma Points in World Frame
-        camera_transform_world = {
-            'R': self.R_world_to_cam,
-            'T': self.camera_world
-        }
-        
         # sigma_points_2d: [N, 5, 2] in Image Plane
         # sigma_points_3d: [N, 5, 3] in World Frame
         # is_valid: [N]
         sigma_points_2d, _, _, _, _, _, sigma_points_3d, is_valid = self.tracker.compute_features(
-            object_pos=self.object_pos,
-            object_quat=self.object_quat,
+            object_pos=self.object_pos, # shape: [N, 3]
+            object_quat=self.object_quat, # shape: [N, 4]
             camera_params=self.camera_params_dict,
-            camera_transform=camera_transform_world,
+            camera_transform=self.camera_transform_world, # camrea pose in world frame
             use_geometric_weight=self.use_geometric_weight,
             debug_timer=self.debug_timer,
             debug_info=self.debug_info
@@ -803,8 +877,11 @@ class LeggedRobotNav(LeggedRobot):
             self._compute_sigma_points_camera()
             self.sigma_points_obs = self.sigma_points_camera
         elif self.perception_frame == "image":
-            self._compute_sigma_points_camera()
-            self._compute_sigma_points_image()
+            if sigma_points_2d is not None:
+                self.sigma_points_image = sigma_points_2d
+            else:
+                self._compute_sigma_points_camera()
+                self._compute_sigma_points_image()
             self.sigma_points_obs = self.sigma_points_image
         else:
             raise ValueError(f"Unknown perception frame: {self.perception_frame}")
@@ -815,7 +892,7 @@ class LeggedRobotNav(LeggedRobot):
         
         self.sigma_points_3d = sigma_points_3d
         self.sigma_points_2d = sigma_points_2d
-
+        self.is_valid = is_valid
 
     def _draw_debug_vis(self, sigma_points_3d=None, sigma_points_2d=None):
         """ Draw Sigma Points in 3D and 2D """
@@ -831,45 +908,47 @@ class LeggedRobotNav(LeggedRobot):
         
         if self.viewer:
             self.gym.clear_lines(self.viewer)
-            
-            # 1. Draw sigma points axes (Env 0)
-            self.vis_utils.draw_sigma_axes(
-                sigma_points=sigma_points_3d[0], 
-                env_idx=0
-            )
 
-            # 2. Sample and Draw target points using cross markers (Env 0)
-            if self.env_shape_type_indices is not None:
-                type_idx = self.env_shape_type_indices[0].item()
-                shape_type = self.shape_types_list[type_idx]
-            else:
-                shape_type = self.cfg.target.shape.type
-
-            if shape_type == "cylinder":
-                shape = Cylinder(device=self.device)
-                params = torch.tensor([self.cfg.target.shape.radius, self.cfg.target.shape.height], device=self.device).unsqueeze(0)
-            elif shape_type == "cuboid":
-                shape = Cuboid(device=self.device)
-                params = torch.tensor([self.cfg.target.shape.dims], device=self.device)
-            elif shape_type == "sphere":
-                shape = Sphere(device=self.device)
-                params = torch.tensor([self.cfg.target.shape.radius], device=self.device).unsqueeze(0)
-            
-            points_local, _ = shape.sample_surface(num_points=100, num_envs=1, params=params)
-            points_local = points_local[0]
-            
-            points_world = quat_apply(self.object_quat[0].unsqueeze(0).expand(points_local.shape[0], -1), points_local) + self.object_pos[0]
-            
+            # Downsample target points for visualization
+            stride_size = int(self.tracker.num_points // self.cfg.camera_sensor.num_vis_points)
+            points_local_sample = self.tracker.local_points[0][::stride_size]  # [num_vis_points, 3]
+            # Transform to world frame
+            points_world_sample = quat_apply(self.object_quat[0].unsqueeze(0).expand(points_local_sample.shape[0], -1), points_local_sample) + self.object_pos[0]
             # Draw target points using cross markers
-            self.vis_utils.draw_3d_lines(points_world, color=[0, 0, 1], env_idx=0)
+            self.vis_utils.draw_3d_lines(points_world_sample, color=[0, 0, 1], env_idx=0)
+            
+            # Draw Sigma points Axes
+            if self.cfg.camera_sensor.vis_sigma_axes:
+                self.vis_utils.draw_sigma_axes(
+                    sigma_points=sigma_points_3d[0], 
+                    env_idx=0
+                )
+            
+            # Draw Object Axes
+            if self.cfg.camera_sensor.vis_object_axes:
+                self.vis_utils.draw_object_axes(
+                    object_pos=self.object_pos[0],
+                    x_axis=self.x_axis_world[0],
+                    y_axis=self.y_axis_world[0],
+                    z_axis=self.z_axis_world[0],
+                    env_idx=0
+                )
+            
+            # Draw Head and Tail Points
+            if self.cfg.camera_sensor.vis_head_tail_points:
+                self.vis_utils.draw_head_tail_points(
+                    head_pos=self.p_head_world[0],
+                    tail_pos=self.p_tail_world[0],
+                    env_idx=0
+                )
             
             # 3. Project to camera image plane and Draw
-            if self.enable_camera and self.common_step_counter % 10 == 0:
+            if self.common_step_counter % 10 == 0:
                 points_dict = {}
                 if self.vis_target_points:
-                    points_dict["target"] = points_world
+                    points_dict["target"] = points_world_sample
                 if self.vis_sigma_3d:
-                    points_dict["sigma"] = sigma_points_3d[0]
+                    points_dict["sigma_3d"] = sigma_points_3d[0]
                 
                 points_2d_dict = {}
                 if self.vis_sigma_2d and sigma_points_2d is not None:
@@ -1034,11 +1113,10 @@ class LeggedRobotNav(LeggedRobot):
             sphere_pose = gymapi.Transform(gymapi.Vec3(x, y, z), r=None)
             gymutil.draw_lines(sphere_red, self.gym, self.viewer, self.envs[i], sphere_pose) 
     
-    def _draw_fov(self):
+    def _draw_fov(self, env_idx=0):
         """ Draw FOV lines for debugging
         """
         # Only draw for the first environment
-        i = 0
         cam = self.camera_sensor
         
         # Get camera parameters for env 0
@@ -1047,13 +1125,13 @@ class LeggedRobotNav(LeggedRobot):
                 return param[idx].item()
             return param
             
-        fx = get_param(cam.fx, i)
-        fy = get_param(cam.fy, i)
-        cx = get_param(cam.cx, i)
-        cy = get_param(cam.cy, i)
+        fx = get_param(cam.fx, env_idx)
+        fy = get_param(cam.fy, env_idx)
+        cx = get_param(cam.cx, env_idx)
+        cy = get_param(cam.cy, env_idx)
         
-        img_w = get_param(cam.img_width, i)
-        img_h = get_param(cam.img_height, i)
+        img_w = get_param(cam.img_width, env_idx)
+        img_h = get_param(cam.img_height, env_idx)
         
         # Define corners in image pixel coordinates: Top-Left, Top-Right, Bottom-Right, Bottom-Left
         corners_pix = torch.tensor([
@@ -1074,14 +1152,14 @@ class LeggedRobotNav(LeggedRobot):
         corners_cam = torch.stack([corners_cam_x, corners_cam_y, corners_cam_z], dim=-1) # (4, 3)
         
         # Transform to Base Frame: P_base = R^T * P_cam + T
-        R = cam.R[i] # (3, 3)
-        T = cam.T[i] # (3)
+        R = cam.R[env_idx] # (3, 3)
+        T = cam.T[env_idx] # (3)
         corners_base = torch.matmul(corners_cam, R) + T
         center_base = T
         
         # Transform to World Frame
-        base_pos = self.root_states[i, :3]
-        base_quat = self.base_quat[i]
+        base_pos = self.root_states[env_idx, :3]
+        base_quat = self.base_quat[env_idx]
         
         corners_world = quat_apply(base_quat.repeat(4, 1), corners_base) + base_pos
         center_world = quat_apply(base_quat, center_base) + base_pos
@@ -1223,7 +1301,7 @@ class LeggedRobotNav(LeggedRobot):
         slow_approach = torch.logical_and(slow_approach, self.base_ang_vel[:, 2].abs() < 0.3)  # also reduce angular velocity
         tracking_velocity = torch.exp(-(self.base_lin_vel[:, 0] - vel_sigma) / 0.1) * (self.base_lin_vel[:, 0] > vel_sigma)
         pitch_restricted = torch.logical_and(self.euler_rpy[:, 1] > 0.25, self.object_pos[:, 2] < 0.2)
-        return 1.0 * soft_area * forward_soft.float() * (~self.out_of_view).float() + 10 * tight_area * slow_approach * tracking_velocity * pitch_restricted.float()
+        return 1.0 * soft_area * forward_soft.float() * (~self.physically_out_of_view).float() + 10 * tight_area * slow_approach * tracking_velocity * pitch_restricted.float()
 
     def _reward_reach_grasp_area(self):
         target_grasp_width = 0.04
@@ -1238,47 +1316,92 @@ class LeggedRobotNav(LeggedRobot):
         """ Reward for approaching the closest tip (Head or Tail) instead of center. """
         # self.sigma_points_base: [N, 5, 3]
         # 0: Center, 1: Head, 2: Tail
-        if not hasattr(self, 'sigma_points_base'):
-            return torch.zeros(self.num_envs, device=self.device)
             
-        p_head = self.sigma_points_base[:, 1, :]
-        p_tail = self.sigma_points_base[:, 2, :]
+        p_head_diff = self.p_head_world[:, :2] - self.root_states[:, :2]
+        p_tail_diff = self.p_tail_world[:, :2] - self.root_states[:, :2]
         
         # Distance to head and tail (in base frame, robot is at 0,0,0)
-        dist_head = torch.norm(p_head, dim=-1)
-        dist_tail = torch.norm(p_tail, dim=-1)
+        dist_head = torch.norm(p_head_diff, dim=-1)
+        dist_tail = torch.norm(p_tail_diff, dim=-1)
         
         # Min distance
         min_dist = torch.min(dist_head, dist_tail)
-        
-        return 1.0 / (1.0 + torch.square(min_dist))
 
-    def _reward_alignment_pca(self):
-        """ Reward for aligning robot heading with object long axis. """
-        if not hasattr(self, 'sigma_points_base'):
-            return torch.zeros(self.num_envs, device=self.device)
+        near_object = (min_dist < 1.0).float()
+        
+        return near_object * (1.0 / (1.0 + 10 * torch.square(min_dist)))
 
-        # Robot heading in base frame is (1, 0, 0)
-        # Object long axis: P_head - P_tail
-        p_head = self.sigma_points_base[:, 1, :]
-        p_tail = self.sigma_points_base[:, 2, :]
+    def _reward_conditional_alignment(self):
+        """
+        Conditional Alignment Reward:
+        If object is long (max_dim > gripper_width), reward aligning with the long axis.
+        """
+        sigma = 0.1
         
-        v_long = p_head - p_tail
-        v_long_norm = v_long / (torch.norm(v_long, dim=-1, keepdim=True) + 1e-6)
+        # Use pre-computed long axis and condition
+        # self.axis_long_world: [N, 3]
+        # self.obj_is_too_long: [N]
         
-        # Cosine similarity with (1, 0, 0)
-        # v_long_norm[:, 0] is the x-component, which is dot product with (1,0,0)
-        cos_sim = v_long_norm[:, 0]
+        dot_prod = torch.abs(torch.sum(self.forward_world * self.axis_long_world, dim=-1))
         
-        # We want alignment, so |cos_sim| should be 1.
-        # Reward = |cos_sim|^k
-        return torch.abs(cos_sim) ** 2
+        # Reward: 1.0 when aligned (dot=1), 0.0 when perpendicular (dot=0)
+        reward = self.obj_is_too_long.float() * torch.exp(-(1.0 - dot_prod) / sigma)
+        
+        return reward
 
-    def _reward_velocity_constraint(self):
-        """ Constraint velocity to be aligned with heading. """
-        # v_lin = self.base_lin_vel (in base frame)
-        # v_heading = (1, 0, 0)
-        # Reward = v_lin . v_heading = v_lin_x
-        # This encourages moving forward.
-        return self.base_lin_vel[:, 0]
+    def _reward_conditional_perpendicular_penalty(self):
+        """
+        Conditional Perpendicular Penalty (Anti-proposition):
+        If object is long, penalize being perpendicular to the long axis.
+        """
+        sigma = 0.1
+        
+        dot_prod = torch.abs(torch.sum(self.forward_world * self.axis_long_world, dim=-1))
+        
+        # Penalty: High when perpendicular (dot=0), Low when aligned (dot=1)
+        penalty = self.obj_is_too_long.float() * torch.exp(-dot_prod / sigma)
+        
+        return penalty
+
+    def _reward_target_directed_velocity(self):
+        """
+        Reward robot for aligning its velocity vector towards the nearest graspable endpoint (Short Edge Vertex).
+        Target-Directed Velocity Reward.
+        """
+        # 1. Prepare Data
+        robot_pos = self.root_states[:, :3]
+        robot_vel = self.root_states[:, 7:10] # World frame linear velocity
+        object_pos = self.object_pos
+                
+        # 3. Dynamic Target Selection (Nearest Endpoint)
+        dist_to_head = torch.norm(self.p_head_world - robot_pos, dim=-1)
+        dist_to_tail = torch.norm(self.p_tail_world - robot_pos, dim=-1)
+        
+        # Choose mask (1 if head is closer)
+        choose_head = (dist_to_head < dist_to_tail).float().unsqueeze(-1)
+        
+        # Endpoint target
+        p_endpoint = choose_head * self.p_head_world + (1.0 - choose_head) * self.p_tail_world
+        
+        # 4. Final Target
+        # If too long -> p_endpoint, else -> object_pos
+        p_target = torch.where(self.obj_is_too_long.unsqueeze(-1), p_endpoint, object_pos)
+        
+        # 5. Expected Direction Vector
+        vec_to_target = p_target - robot_pos
+        dir_to_target = vec_to_target / (torch.norm(vec_to_target, dim=-1, keepdim=True) + 1e-6)
+        
+        # 6. Velocity Projection
+        vel_projection = torch.sum(robot_vel * dir_to_target, dim=-1)
+        
+        # 7. Reward Shaping
+        target_speed = 0.5
+        r_vel = torch.exp(-torch.square(vel_projection - target_speed))
+        
+        return r_vel
+
+    def _reward_missing_sigma_points(self):
+        """ Reward for missing sigma points in the view
+        """
+        return (~self.is_valid).float()
     

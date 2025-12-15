@@ -8,6 +8,11 @@ class TargetCfg:
         # For cuboid: x, y, z
         dims = [0.05, 0.20, 0.05] 
         
+        # Randomization Ranges
+        radius_range = [0.03, 0.05]
+        height_range = [0.15, 0.25]
+        dims_range = [[0.04, 0.06], [0.15, 0.25], [0.04, 0.06]] # [min, max] for x, y, z
+
         # For mixed
         types = ["cylinder", "cuboid", "sphere"]
         

@@ -58,6 +58,53 @@ class VisualizationUtils:
             self.gym.add_lines(self.viewer, self.env.envs[env_idx], 1, [px, py-d, pz, px, py+d, pz], color)
             self.gym.add_lines(self.viewer, self.env.envs[env_idx], 1, [px, py, pz-d, px, py, pz+d], color)
 
+    def draw_object_axes(self, object_pos, x_axis, y_axis, z_axis, env_idx=0, axis_len=0.3):
+        """
+        Draw object coordinate axes.
+        object_pos: [3] Tensor
+        x_axis, y_axis, z_axis: [3] Tensor
+        """
+        if not self.viewer:
+            return
+        
+        center = object_pos.cpu().numpy()
+        p_x = (object_pos + x_axis * axis_len).cpu().numpy()
+        p_y = (object_pos + y_axis * axis_len).cpu().numpy()
+        p_z = (object_pos + z_axis * axis_len).cpu().numpy()
+        
+        # X Axis (Red)
+        self.gym.add_lines(self.viewer, self.env.envs[env_idx], 1, np.array([center[0], center[1], center[2], p_x[0], p_x[1], p_x[2]], dtype=np.float32), np.array([1, 0, 0], dtype=np.float32))
+        # Y Axis (Green)
+        self.gym.add_lines(self.viewer, self.env.envs[env_idx], 1, np.array([center[0], center[1], center[2], p_y[0], p_y[1], p_y[2]], dtype=np.float32), np.array([0, 1, 0], dtype=np.float32))
+        # Z Axis (Blue)
+        self.gym.add_lines(self.viewer, self.env.envs[env_idx], 1, np.array([center[0], center[1], center[2], p_z[0], p_z[1], p_z[2]], dtype=np.float32), np.array([0, 0, 1], dtype=np.float32))
+
+    def draw_head_tail_points(self, head_pos, tail_pos, env_idx=0):
+        """
+        Draw markers (crosses) at head and tail points.
+        """
+        if not self.viewer:
+            return
+            
+        head = head_pos.cpu().numpy()
+        tail = tail_pos.cpu().numpy()
+        
+        d = 0.05 # 5cm marker size
+        
+        # Head (Cyan)
+        color_head = np.array([0, 1, 1], dtype=np.float32)
+        px, py, pz = head
+        self.gym.add_lines(self.viewer, self.env.envs[env_idx], 1, np.array([px-d, py, pz, px+d, py, pz], dtype=np.float32), color_head)
+        self.gym.add_lines(self.viewer, self.env.envs[env_idx], 1, np.array([px, py-d, pz, px, py+d, pz], dtype=np.float32), color_head)
+        self.gym.add_lines(self.viewer, self.env.envs[env_idx], 1, np.array([px, py, pz-d, px, py, pz+d], dtype=np.float32), color_head)
+
+        # Tail (Magenta)
+        color_tail = np.array([1, 0, 1], dtype=np.float32)
+        px, py, pz = tail
+        self.gym.add_lines(self.viewer, self.env.envs[env_idx], 1, np.array([px-d, py, pz, px+d, py, pz], dtype=np.float32), color_tail)
+        self.gym.add_lines(self.viewer, self.env.envs[env_idx], 1, np.array([px, py-d, pz, px, py+d, pz], dtype=np.float32), color_tail)
+        self.gym.add_lines(self.viewer, self.env.envs[env_idx], 1, np.array([px, py, pz-d, px, py, pz+d], dtype=np.float32), color_tail)
+
     def project_points_to_image(self, points_3d, camera_sensor, env_idx=0):
         """
         Project 3D points (in World Frame) to Image Plane.
@@ -103,25 +150,29 @@ class VisualizationUtils:
         points_3d_dict: Dict of {"label": points_tensor_3d}
         points_2d_dict: Dict of {"label": points_tensor_2d} (normalized [0, 1])
         """
-        if not hasattr(self.env, 'cam_handles'):
-            return
-
-        camera_handle = self.env.cam_handles[env_idx]
-        image = self.gym.get_camera_image(self.env.sim, self.env.envs[env_idx], camera_handle, gymapi.IMAGE_COLOR)
+        # Get dimensions from config
+        h = camera_sensor.cfg.intrinsics.img_height
+        w = camera_sensor.cfg.intrinsics.img_width
         
-        h = self.env.cfg.camera_sensor.intrinsics.img_height
-        w = self.env.cfg.camera_sensor.intrinsics.img_width
+        # Try to get image from Isaac Gym if available
+        # if hasattr(self.env, 'cam_handles') and self.env.cam_handles and len(self.env.cam_handles) > env_idx:
+        if self.env.enable_camera:
+            camera_handle = self.env.cam_handles[env_idx]
+            image = self.gym.get_camera_image(self.env.sim, self.env.envs[env_idx], camera_handle, gymapi.IMAGE_COLOR)
+            image = image.reshape(h, w, 4)
+            image = image[:, :, :3] # RGB
+            image = image.astype(np.uint8)
+            image = np.ascontiguousarray(image)
         
-        image = image.reshape(h, w, 4)
-        image = image[:, :, :3] # RGB
-        image = image.astype(np.uint8)
-        image = np.ascontiguousarray(image)
+        # If no image (camera disabled), create a blank one
+        else:
+            image = np.zeros((h, w, 3), dtype=np.uint8)
         
         colors = {
             "target": (0, 255, 0), # Green
-            "sigma": (0, 0, 255),  # Red
-            "sigma_2d": (0, 255, 255), # Yellow
-            "other": (255, 0, 0)   # Blue
+            "sigma_3d": (255, 0, 0),  # Red
+            "sigma_2d": (255, 255, 255), # White
+            "other": (0, 0, 255)   # Blue
         }
         
         # Draw 3D Points
@@ -154,7 +205,7 @@ class VisualizationUtils:
                         if i == 0:
                             cv2.circle(image, (u, v), 2, color, 2)
                         else:
-                            cv2.drawMarker(image, (u, v), color, markerType=cv2.MARKER_CROSS, markerSize=7, thickness=1)
+                            cv2.drawMarker(image, (u, v), color, markerType=cv2.MARKER_CROSS, markerSize=6, thickness=2)
 
         image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
         

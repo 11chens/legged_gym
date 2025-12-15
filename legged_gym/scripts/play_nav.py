@@ -122,7 +122,7 @@ def play(args):
 
         u = env.P_image[0, 0].item()
         v = env.P_image[0, 1].item()
-        depth = env.depth[0].item()
+        depth = env.depth_in_view[0].item()
 
         vx = env.base_lin_vel[0, 0]
         vy = env.base_lin_vel[0, 1]

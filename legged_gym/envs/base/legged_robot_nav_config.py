@@ -97,6 +97,8 @@ class LeggedRobotNavCfg(LeggedRobotCfg):
             stand_still = 0.0
             foot_clearance = -0.001  # -0.01
             orientation = -0.2
+            conditional_alignment = 0.5
+            conditional_perpendicular_penalty = -0.5
 
     class normalization:
         class obs_scales:

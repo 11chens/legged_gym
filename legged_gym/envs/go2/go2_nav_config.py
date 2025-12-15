@@ -97,8 +97,8 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
     
 
     class commands:
+        resample_on_the_way = True
         add_boost = False
-        img_frame = True  # if True, the commands are given in the image frame, otherwise in the camera frame
         curriculum = False
         max_curriculum = 1.
         num_commands = 4
@@ -113,23 +113,27 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
 
         class ranges:
             limit_vx = [0.18, 0.5]  # [m/s]
-            limit_vy = [-0.1, 0.1]  # [m/s]
+            limit_vy = [-0.5, 0.5]  # [m/s]
             limit_vyaw = [-1.0, 1.0]  # [rad/s]
             limit_pitch = [-3.14/6, 3.14/6]  # [rad]
             heading = [-0.3, 0.3]  # a residual heading plus theta
     
     class camera_sensor:
-        enable_camera = True  # if True, the image of isaacgym is enabled, otherwise it is disabled
-        save_debug_images = False # if True, save debug images to disk, otherwise view in real-time
+        enable_camera = False  # if True, the image of isaacgym is enabled, otherwise it is disabled
+        num_vis_points = 100  # number of points sampling from target points for visualization
+        vis_sigma_axes = False  # if True, visualize the sigma points axes in the world
+        vis_object_axes = True  # if True, visualize the object coordinate axes in the world
+        vis_head_tail_points = True  # if True, visualize the head and tail points in the world
         vis_target_points = False # if True, visualize target points (green)
-        vis_sigma_3d = False # if True, visualize 3D sigma points (blue)
-        vis_sigma_2d = True # if True, visualize 2D sigma points (yellow)
+        vis_sigma_3d = True # if True, visualize 3D sigma points (blue)
+        vis_sigma_2d = False # if True, visualize 2D sigma points (yellow)
+        save_debug_images = False # if True, save debug images to disk, otherwise view in real-time
         fix_extrinsics = True  # if True, the camera extrinsics are fixed, otherwise they are randomized
         fix_intrinsics = True  # if True, the camera intrinsics are fixed, otherwise they are randomized
         fix_img_shape = True  # if True, the image shape is fixed, otherwise it is randomized
         clip_invalid = False # if True, the invalid image coordinates are clipped to -1, otherwise they are kept as is
         max_out_of_view_duration = 2.0 # [s] the duration to keep the out of view coordinates
-        enable_out_of_view_drift = True # if True, add random walk drift when out of view
+        enable_out_of_view_drift = False # if True, add random walk drift when out of view
         drift_scale = 0.02 # scale of the random walk drift per step
 
         class intrinsics: # Intrinsics parameters
@@ -293,24 +297,28 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
 
     class rewards():
         class scales():
-            heading_target = 2.0 # 1.0
             lin_vel_z = -1.0 # -3.0
             ang_vel_xy = -0.1
             orientation_y = -4.0
             nav_action_rate = -2.0
             nav_action_limit = -2.0
+
+            heading_target = 2.0 # 1.0
             view_missing = -2.0
             tracking_horizontal_distance = 50.0
             tracking_view_center = 0.5
-            horizontal_distance_error = -0.0
             forward = 1.0 # 1.0
-            reach_grasp_area = 0
 
-            stand_still = 0 # 500.0
-            action_rate = 0.0 # -0.01 # -0.005 
-            cmds_track = 0.0 # -0.2 
-            torques = 0.0 #  -0.0002
-            reach_target = 0.0 # 50.0 
+            # [Sigma points related rewards]
+            heading_target = 0.0
+            view_missing = 0.0
+            tracking_horizontal_distance = 0.0
+            tracking_view_center = 0.0
+            forward = 0.0
+            approach_tip = 5.0
+            conditional_alignment = 5.0
+            target_directed_velocity = 0.0
+            missing_sigma_points = -5.0
 
         soft_dof_pos_limit = 0.95
         base_height_target = 0.25

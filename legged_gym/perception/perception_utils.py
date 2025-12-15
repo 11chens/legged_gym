@@ -108,23 +108,23 @@ def project_points(points_world, camera_params, camera_transform):
     
     points_2d = torch.stack([u_norm, v_norm], dim=-1) # [N, M, 2]
     
-    # Valid mask: Z > 0 (in front of camera)
-    valid_mask = Z > 1e-4
+    # Valid mask: Z > 0 (in front of camera) AND inside image bounds [0, 1]
+    valid_mask = (Z > 1e-4) & (u_norm >= 0.0) & (u_norm <= 1.0) & (v_norm >= 0.0) & (v_norm <= 1.0)
     
     return points_2d, valid_mask
 
-def compute_weighted_pca(points_2d, weights):
+def compute_weighted_pca(points, weights):
     """
-    Compute weighted PCA of 2D points.
+    Compute weighted PCA of points (supports arbitrary dimension, e.g. 2D or 3D).
     
     Args:
-        points_2d (Tensor): [num_envs, num_points, 2]
-        weights (Tensor): [num_envs, num_points, 1]
+        points (Tensor): [num_envs, num_points, dim] Points (e.g. dim=2 or dim=3).
+        weights (Tensor): [num_envs, num_points, 1] Weights.
         
     Returns:
-        mean (Tensor): [num_envs, 2] Weighted mean (center)
-        eigvals (Tensor): [num_envs, 2] Eigenvalues (ascending: short, long)
-        eigvecs (Tensor): [num_envs, 2, 2] Eigenvectors (columns)
+        mean (Tensor): [num_envs, dim] Weighted mean (center)
+        eigvals (Tensor): [num_envs, dim] Eigenvalues (ascending: small to large)
+        eigvecs (Tensor): [num_envs, dim, dim] Eigenvectors (columns)
         valid (Tensor): [num_envs] Boolean mask indicating if PCA is valid (sum_weights > 0)
     """
     # 1. Weighted Mean
@@ -133,15 +133,15 @@ def compute_weighted_pca(points_2d, weights):
     
     sum_weights = torch.where(sum_weights < 1e-6, torch.ones_like(sum_weights), sum_weights) # Avoid div by zero
     
-    mean = torch.sum(points_2d * weights, dim=1) / sum_weights # [N, 2]
+    mean = torch.sum(points * weights, dim=1) / sum_weights # [N, dim]
     
     # 2. Weighted Centered
-    centered = (points_2d - mean.unsqueeze(1)) * torch.sqrt(weights) # [N, M, 2]
+    centered = (points - mean.unsqueeze(1)) * torch.sqrt(weights) # [N, M, dim]
     
     # 3. Weighted Covariance
     # cov = (X^T * X) / (sum_w - 1)
-    # centered is [N, M, 2]
-    # bmm: [N, 2, M] @ [N, M, 2] -> [N, 2, 2]
+    # centered is [N, M, dim]
+    # bmm: [N, dim, M] @ [N, M, dim] -> [N, dim, dim]
     cov = torch.bmm(centered.transpose(1, 2), centered) / (sum_weights.unsqueeze(-1) - 1 + 1e-6)
     
     # 4. Eigendecomposition
@@ -152,7 +152,8 @@ def compute_weighted_pca(points_2d, weights):
 
 def generate_sigma_points(mean, eigvals, eigvecs, alpha=2.0):
     """
-    Generate 5 sigma points from PCA results (using top 2 principal components).
+    Generate 5 sigma points from PCA results using the top 2 principal components.
+    Note: Even for 3D data, this only uses the 2 largest eigenvalues/vectors.
     
     Args:
         mean (Tensor): [num_envs, dim]
