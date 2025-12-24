@@ -32,10 +32,16 @@ from legged_gym.envs.base.legged_robot_config import LeggedRobotCfgPPO
 from legged_gym.envs.base.legged_robot_nav_config import LeggedRobotNavCfg
 from legged_gym.envs.base.target_config import TargetCfg
 
-# NUM_NAV_COMMANDS = 2  # P_img_x, P_img_y
-NUM_SIGMA_POINTS = 5
-NUM_NAV_COMMANDS = 15 # 5 points * 3 coords (x, y, z) in Base Frame
-EPISODE_LENGTH_S = 12
+USE_3D_SIGMA_POINTS = True # Toggle between 3D (7 points) and 2D (5 points)
+
+if USE_3D_SIGMA_POINTS:
+    NUM_SIGMA_POINTS = 7 # 2*3 + 1
+    NUM_NAV_COMMANDS = 21 # 7 points * 3 coords (x, y, z) in Camera Frame
+else:
+    NUM_SIGMA_POINTS = 5 # 2*2 + 1
+    NUM_NAV_COMMANDS = 15 # 5 points * 3 coords (u, v, z) in Image Plane
+
+EPISODE_LENGTH_S = 6
 USE_RNN = False
 
 class Go2NavFlatCfg( LeggedRobotNavCfg ):
@@ -43,6 +49,7 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
     debug_viz = True
     pixel_gain = 10.0
     class env(LeggedRobotNavCfg.env):
+        use_3d_sigma_points = USE_3D_SIGMA_POINTS
         num_position = 3 # x, y, z
         num_nav_actions = 4 # vx, vy, vyaw, pitch
         nav_history_len = 10
@@ -50,10 +57,11 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
         # num_priv = 3 + 1 # +3 for P_base, +1 for timer
         # num_priv = 3
         num_sigma_points = NUM_SIGMA_POINTS
-        num_nav_commands = NUM_NAV_COMMANDS # 5 points * 2 (u, v) + 1 (distance)
+        num_nav_commands = NUM_NAV_COMMANDS 
         # num_props = num_nav_actions + 11 # lin_vel(3), ang_vel(3), gravity(3), pitch(1), phase(1)
         # num_props = num_nav_actions + num_nav_commands + 10 # lin_vel(3), ang_vel(3), gravity(3), pitch(1)
-        num_props = num_nav_actions + num_nav_commands + 12 # lin_vel(3), ang_vel(3), gravity(3), rpy(3)
+        num_task_flags = 1
+        num_props = num_nav_actions + num_nav_commands + num_task_flags + 12 # lin_vel(3), ang_vel(3), gravity(3), rpy(3)
         
         # num_priv = 3 + 1 # +3 for P_base, +1 for timer
         num_priv = NUM_SIGMA_POINTS * 3 # P_camera [N, M, 3] flattened
@@ -75,6 +83,16 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
         arbiter = False
         encode = True
         no_time_limit = False
+
+        # Optimal Grasp Pose Parameters
+        grasp_offset_long = 0.0 # [m] Distance from long-axis vertex (Head/Tail)
+        grasp_offset_short = 0.0 # [m] Distance from object surface (Short axis)
+        
+        # Hint Pose Parameters
+        hint_dist_long = 0.4 # [m] Distance from long-axis vertex for hint pose
+        hint_dist_short = 0.4 # [m] Distance from robot start point for hint pose
+
+        pitch_target = 0.5 # [rad] target pitch angle for optimal grasp pose
 
     class init_state( LeggedRobotNavCfg.init_state ):
         pos = [0.0, 0.0, 0.42]
@@ -98,6 +116,7 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
 
     class commands:
         resample_on_the_way = True
+        resample_on_success_path = True # Active feeding of success state
         add_boost = False
         curriculum = False
         max_curriculum = 1.
@@ -112,84 +131,59 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
         min_delay_time_ms = 0  # minimum delay time in milliseconds
 
         class ranges:
-            limit_vx = [0.18, 0.5]  # [m/s]
+            # limit_vx = [0.18, 0.5]  # [m/s]
+            limit_vx = [-0.5, 0.5]  # [m/s]
             limit_vy = [-0.5, 0.5]  # [m/s]
             limit_vyaw = [-1.0, 1.0]  # [rad/s]
             limit_pitch = [-3.14/6, 3.14/6]  # [rad]
             heading = [-0.3, 0.3]  # a residual heading plus theta
     
+    class gripper:
+        gripper_offset = [0.4, 0.0, -0.05]
+        gripper_width = 0.12 # [m]
+    
     class camera_sensor:
+        # visualization options
         enable_camera = False  # if True, the image of isaacgym is enabled, otherwise it is disabled
         num_vis_points = 100  # number of points sampling from target points for visualization
+        vis_gripper_position = True # if True, visualize the gripper position in the world
         vis_sigma_axes = False  # if True, visualize the sigma points axes in the world
-        vis_object_axes = True  # if True, visualize the object coordinate axes in the world
-        vis_head_tail_points = True  # if True, visualize the head and tail points in the world
-        vis_target_points = False # if True, visualize target points (green)
-        vis_sigma_3d = True # if True, visualize 3D sigma points (blue)
+        vis_object_axes = False  # if True, visualize the object coordinate axes in the world
+        vis_head_tail_points = False  # if True, visualize the head and tail points in the world
+        vis_target_points_in_image = False # if True, visualize target points (green) in image
+        vis_sigma_3d_in_image = False # if True, visualize 3D sigma points (blue) in image
+        vis_sigma_3d_in_world = True # if True, visualize 3D sigma points (white) in world
         vis_sigma_2d = False # if True, visualize 2D sigma points (yellow)
+        vis_sigma_y_spread = False # if True, visualize the sigma points Y-spread axis (yellow)
         save_debug_images = False # if True, save debug images to disk, otherwise view in real-time
-        fix_extrinsics = True  # if True, the camera extrinsics are fixed, otherwise they are randomized
-        fix_intrinsics = True  # if True, the camera intrinsics are fixed, otherwise they are randomized
-        fix_img_shape = True  # if True, the image shape is fixed, otherwise it is randomized
+
+        # Environment configuration
         clip_invalid = False # if True, the invalid image coordinates are clipped to -1, otherwise they are kept as is
         max_out_of_view_duration = 2.0 # [s] the duration to keep the out of view coordinates
         enable_out_of_view_drift = False # if True, add random walk drift when out of view
         drift_scale = 0.02 # scale of the random walk drift per step
 
+        # Camera extrinsics and intrinsics
+        fix_extrinsics = True  # if True, the camera extrinsics are fixed, otherwise they are randomized
+        fix_intrinsics = True  # if True, the camera intrinsics are fixed, otherwise they are randomized
+        fix_img_shape = True  # if True, the image shape is fixed, otherwise it is randomized
+
         class intrinsics: # Intrinsics parameters
-            # Zed mini, HD720 mode
-            # img_width = 1280
-            # img_height = 720
-            # horizontal_fov = 82.33
-            # fx = 731.995849609375
-            # fy = 731.995849609375
-            # cx = 620.0855102539062
-            # cy = 362.5731201171875
-
-            # # Zed mini, VGA mode
-            # img_width = 672
-            # img_height = 376
-            # horizontal_fov = 85.0
-            # fx = 367.0 # fx = img_width / (2 * tan(horizontal_fov/2 * pi/180))
-            # fy = 367.0 # fy = fx
-            # cx = 336.0 # cx = img_width / 2
-            # cy = 188.0 # cy = img_height / 2
-
-            # # Zed mini, HD720 mode, scaled to 320x180
-            # img_width = 320
-            # img_height = 180
-            # horizontal_fov = 82.33
-            # fx = 182.9919 # fx = img_width / (2 * tan(horizontal_fov/2 * pi/180))
-            # fy = 182.9919 # fy = fx
-            # cx = 155.02 # 160.0
-            # cy = 90.64 # 90.0
-
-            # Realsense D435i
-            # 640x360, HFOV=70.26
-            # img_width = 640
-            # img_height = 360
             horizontal_fov = 70.26
-            # fx = 454.768310546875  # fx = img_width / (2 * np.tan(np.deg2rad(horizontal_fov) / 2))
-            # fy = 454.4901123046875
-            # cx = 325.7699279785156
-            # cy = 184.68618774414062
-
+            # img_width = 320
+            # img_height = 240
+            # fx = 303.1788635253906 # fx = img_width / (2 * tan(horizontal_fov/2))
+            # fy = 302.993408203125
+            # cx = 163.8466033935547
+            # cy = 123.1241226196289
 
             # 320*180
-            # img_width = 320
-            # img_height = 180
-            # fx = 227.3841552734375
-            # fy = 227.24505615234375
-            # cx = 162.8849639892578
-            # cy = 92.34309387207031
-
-            # 320*240
             img_width = 320
-            img_height = 240
-            fx = 303.1788635253906
-            fy = 302.993408203125
-            cx = 163.8466033935547
-            cy = 123.1241226196289
+            img_height = 180
+            fx = 227.3841552734375
+            fy = 227.24505615234375
+            cx = 162.8849639892578
+            cy = 92.34309387207031
 
             horizontal_fov_range = [-2.0, 2.0] # [degree]
             img_height_range = [90, 720] # [pixel]
@@ -291,17 +285,17 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
             pitch = 0.1 # 0.1
             euler_rpy = 0.1
             
-            P_img_u = 0.01
-            P_img_v = 0.01
-            P_img_depth = 0.2
+            nav_cmd_x = 0.01 # point_x
+            nav_cmd_y = 0.01 # point_y
+            nav_cmd_z = 0.01 # point_z
 
     class rewards():
         class scales():
             lin_vel_z = -1.0 # -3.0
             ang_vel_xy = -0.1
             orientation_y = -4.0
-            nav_action_rate = -2.0
-            nav_action_limit = -2.0
+            nav_action_rate = -0.1
+            nav_action_limit = -0.1
 
             heading_target = 2.0 # 1.0
             view_missing = -2.0
@@ -315,10 +309,17 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
             tracking_horizontal_distance = 0.0
             tracking_view_center = 0.0
             forward = 0.0
-            approach_tip = 5.0
-            conditional_alignment = 5.0
+
+            # New rewards for sigma points
+            approach_tip = 0.0
+            conditional_alignment = 0.0
             target_directed_velocity = 0.0
-            missing_sigma_points = -5.0
+            visual_foreshortening = 0.0
+            missing_sigma_points = -0.5
+            optimal_pose_tracking = 1.0
+            successful_grasp = 100.0
+            backup = -10.0
+            sequential_reaching = 5.0
 
         soft_dof_pos_limit = 0.95
         base_height_target = 0.25

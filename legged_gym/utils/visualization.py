@@ -2,7 +2,7 @@ import torch
 import numpy as np
 import cv2
 import os
-from isaacgym import gymapi
+from isaacgym import gymapi, gymutil
 from isaacgym.torch_utils import quat_apply, quat_rotate_inverse
 
 class VisualizationUtils:
@@ -18,23 +18,61 @@ class VisualizationUtils:
         os.makedirs(self.save_dir, exist_ok=True)
         self.frame_idx = 0
 
+        self.sphere_red = gymutil.WireframeSphereGeometry(0.05, 4, 4, None, color=(1, 0, 0))
+        self.sphere_green = gymutil.WireframeSphereGeometry(0.05, 4, 4, None, color=(0, 1, 0))
+        self.sphere_blue = gymutil.WireframeSphereGeometry(0.05, 4, 4, None, color=(0, 0, 1))
+
+    def draw_sigma_points_3d(self, sigma_points, env_idx=0):
+        """
+        Draw sigma points in 3D world frame.
+        sigma_points: [N, 3] Tensor
+        """
+        if not self.viewer:
+            return
+            
+        if isinstance(sigma_points, torch.Tensor):
+            points = sigma_points.cpu().numpy()
+        else:
+            points = sigma_points
+            
+        # Draw White Crosses for 3D Sigma Points
+        d = 0.01 # 1cm size
+        color = np.array([1, 1, 1], dtype=np.float32) # White
+        
+        for i in range(points.shape[0]):
+            px, py, pz = points[i]
+            self.gym.add_lines(self.viewer, self.env.envs[env_idx], 1, np.array([px-d, py, pz, px+d, py, pz], dtype=np.float32), color)
+            self.gym.add_lines(self.viewer, self.env.envs[env_idx], 1, np.array([px, py-d, pz, px, py+d, pz], dtype=np.float32), color)
+            self.gym.add_lines(self.viewer, self.env.envs[env_idx], 1, np.array([px, py, pz-d, px, py, pz+d], dtype=np.float32), color)
+
     def draw_sigma_axes(self, sigma_points, env_idx=0):
         """
         Draw the PCA sigma points as axes in 3D.
-        sigma_points: [5, 3] Tensor
+        sigma_points: [N, 3] Tensor
         """
         if not self.viewer:
             return
             
         p = sigma_points.cpu().numpy()
-        center, head, tail, side1, side2 = p[0], p[1], p[2], p[3], p[4]
+        center = p[0]
         
-        # Long Axis (Green)
-        self.gym.add_lines(self.viewer, self.env.envs[env_idx], 1, [center[0], center[1], center[2], head[0], head[1], head[2]], [0, 1, 0])
-        self.gym.add_lines(self.viewer, self.env.envs[env_idx], 1, [center[0], center[1], center[2], tail[0], tail[1], tail[2]], [0, 1, 0])
-        # Short Axis (Red)
-        self.gym.add_lines(self.viewer, self.env.envs[env_idx], 1, [center[0], center[1], center[2], side1[0], side1[1], side1[2]], [1, 0, 0])
-        self.gym.add_lines(self.viewer, self.env.envs[env_idx], 1, [center[0], center[1], center[2], side2[0], side2[1], side2[2]], [1, 0, 0])
+        # Axis 1 (Green)
+        if p.shape[0] >= 3:
+            head, tail = p[1], p[2]
+            self.gym.add_lines(self.viewer, self.env.envs[env_idx], 1, np.array([center[0], center[1], center[2], head[0], head[1], head[2]], dtype=np.float32), np.array([0, 1, 0], dtype=np.float32))
+            self.gym.add_lines(self.viewer, self.env.envs[env_idx], 1, np.array([center[0], center[1], center[2], tail[0], tail[1], tail[2]], dtype=np.float32), np.array([0, 1, 0], dtype=np.float32))
+            
+        # Axis 2 (Red)
+        if p.shape[0] >= 5:
+            side1, side2 = p[3], p[4]
+            self.gym.add_lines(self.viewer, self.env.envs[env_idx], 1, np.array([center[0], center[1], center[2], side1[0], side1[1], side1[2]], dtype=np.float32), np.array([1, 0, 0], dtype=np.float32))
+            self.gym.add_lines(self.viewer, self.env.envs[env_idx], 1, np.array([center[0], center[1], center[2], side2[0], side2[1], side2[2]], dtype=np.float32), np.array([1, 0, 0], dtype=np.float32))
+            
+        # Axis 3 (Blue)
+        if p.shape[0] >= 7:
+            top, bottom = p[5], p[6]
+            self.gym.add_lines(self.viewer, self.env.envs[env_idx], 1, np.array([center[0], center[1], center[2], top[0], top[1], top[2]], dtype=np.float32), np.array([0, 0, 1], dtype=np.float32))
+            self.gym.add_lines(self.viewer, self.env.envs[env_idx], 1, np.array([center[0], center[1], center[2], bottom[0], bottom[1], bottom[2]], dtype=np.float32), np.array([0, 0, 1], dtype=np.float32))
         
 
     def draw_3d_lines(self, points, color=[0, 1, 0], env_idx=0):
@@ -78,6 +116,224 @@ class VisualizationUtils:
         self.gym.add_lines(self.viewer, self.env.envs[env_idx], 1, np.array([center[0], center[1], center[2], p_y[0], p_y[1], p_y[2]], dtype=np.float32), np.array([0, 1, 0], dtype=np.float32))
         # Z Axis (Blue)
         self.gym.add_lines(self.viewer, self.env.envs[env_idx], 1, np.array([center[0], center[1], center[2], p_z[0], p_z[1], p_z[2]], dtype=np.float32), np.array([0, 0, 1], dtype=np.float32))
+
+    def draw_optimal_grasp_pose(self, pos, quat, env_idx=0, axis_len=0.3):
+        """
+        Draw the optimal grasp pose as a coordinate frame.
+        pos: [3] Tensor
+        quat: [4] Tensor
+        """
+        if not self.viewer:
+            return
+
+        # Ensure inputs are on the correct device if they are tensors
+        if isinstance(pos, torch.Tensor):
+            pos = pos.to(self.device)
+        if isinstance(quat, torch.Tensor):
+            quat = quat.to(self.device)
+
+        x_axis = quat_apply(quat.unsqueeze(0), torch.tensor([[1.0, 0, 0]], device=self.device)).squeeze() * axis_len
+        y_axis = quat_apply(quat.unsqueeze(0), torch.tensor([[0, 1.0, 0]], device=self.device)).squeeze() * axis_len
+        z_axis = quat_apply(quat.unsqueeze(0), torch.tensor([[0, 0, 1.0]], device=self.device)).squeeze() * axis_len
+        
+        p0 = pos.cpu().numpy()
+        px = (pos + x_axis).cpu().numpy()
+        py = (pos + y_axis).cpu().numpy()
+        pz = (pos + z_axis).cpu().numpy()
+        
+        verts = np.stack([p0, px, p0, py, p0, pz], axis=0) # (6, 3)
+        colors = np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=np.float32) # (3, 3)
+        
+        self.gym.add_lines(self.viewer, self.env.envs[env_idx], 3, verts, colors)
+
+    def draw_camera_position(self):
+        """ Draw camera position in world frame """
+        if not self.viewer: return
+        
+        # Check if camera_world exists
+        if not hasattr(self.env, 'camera_world'):
+            return
+
+        for i in range(self.env.num_envs):
+            pos = self.env.camera_world[i]
+            sphere_pose = gymapi.Transform(gymapi.Vec3(pos[0], pos[1], pos[2]), r=None)
+            gymutil.draw_lines(self.sphere_red, self.gym, self.viewer, self.env.envs[i], sphere_pose)
+
+    def draw_gripper_position(self, gripper_pos, env_idx=0):
+        """ Draw gripper position in world frame """
+        if not self.viewer: return
+        sphere_pose = gymapi.Transform(gymapi.Vec3(gripper_pos[0], gripper_pos[1], gripper_pos[2]), r=None)
+        if self.env.task_flags[env_idx] == 1:  # Grasp task - Red
+            gymutil.draw_lines(self.sphere_red, self.gym, self.viewer, self.env.envs[env_idx], sphere_pose)
+        else:  # Place task - Green
+            gymutil.draw_lines(self.sphere_green, self.gym, self.viewer, self.env.envs[env_idx], sphere_pose)
+
+    def draw_fov(self, env_idx=0):
+        """ Draw FOV lines for debugging """
+        if not self.viewer: return
+
+        cam = self.env.camera_sensor
+        # Use cached params if available, else from sensor
+        # Fallback
+        fx = cam.fx
+        fy = cam.fy
+        cx = cam.cx
+        cy = cam.cy
+        img_w = cam.img_width
+        img_h = cam.img_height
+
+        # Define corners in image pixel coordinates
+        corners_pix = torch.tensor([
+            [0, 0],
+            [img_w, 0],
+            [img_w, img_h],
+            [0, img_h]
+        ], device=self.device, dtype=torch.float)
+        
+        # Transform to Camera Frame
+        depth = 3.5 # Max visual distance
+        
+        # x = (u - cx) * Z / fx, y = (v - cy) * Z / fy, z = Z
+        corners_cam_x = (corners_pix[:, 0] - cx) * depth / fx
+        corners_cam_y = (corners_pix[:, 1] - cy) * depth / fy
+        corners_cam_z = torch.full((4,), depth, device=self.device)
+        
+        corners_cam = torch.stack([corners_cam_x, corners_cam_y, corners_cam_z], dim=-1) # (4, 3)
+        
+        # Transform to World Frame directly
+        # P_world = P_cam @ R_world_to_cam + T_world
+        R_w2c = self.env.R_world_to_cam[env_idx] # [3, 3]
+        T_w = self.env.camera_world[env_idx] # [3]
+        
+        corners_world = torch.matmul(corners_cam, R_w2c) + T_w
+        center_world = T_w
+        
+        # Draw lines
+        sphere_geom = gymutil.WireframeSphereGeometry(0.02, 4, 4, None, color=(1, 0, 1))
+        
+        corners = corners_world.cpu().numpy()
+        center = center_world.cpu().numpy()
+        
+        def draw_thick_line(start, end, num_spheres=50):
+            for k in range(num_spheres + 1):
+                t = k / num_spheres
+                pos = start + (end - start) * t
+                pose = gymapi.Transform(gymapi.Vec3(pos[0], pos[1], pos[2]), r=None)
+                gymutil.draw_lines(sphere_geom, self.gym, self.viewer, None, pose)
+
+        # 4 lines from center to corners
+        for k in range(4):
+            draw_thick_line(center, corners[k], num_spheres=50)
+            
+        # 4 lines connecting corners
+        for k in range(4):
+            draw_thick_line(corners[k], corners[(k+1)%4], num_spheres=50)
+
+
+    def draw_hint_pose(self, pos, quat, env_idx=0, axis_len=0.15):
+        """
+        Draw the hint pose as a coordinate frame.
+        pos: [3] Tensor
+        quat: [4] Tensor
+        """
+        self.draw_optimal_grasp_pose(pos, quat, env_idx, axis_len)
+
+    def draw_start_pos(self, pos, env_idx=0):
+        """
+        Draw the start position marker.
+        pos: [3] Tensor
+        """
+        if not self.viewer:
+            return
+            
+        if isinstance(pos, torch.Tensor):
+            pos = pos.cpu().numpy()
+            
+        d = 0.05 # 5cm marker size
+        
+        # Yellow
+        color = np.array([1, 1, 0], dtype=np.float32)
+        px, py, pz = pos
+        self.gym.add_lines(self.viewer, self.env.envs[env_idx], 1, np.array([px-d, py, pz, px+d, py, pz], dtype=np.float32), color)
+        self.gym.add_lines(self.viewer, self.env.envs[env_idx], 1, np.array([px, py-d, pz, px, py+d, pz], dtype=np.float32), color)
+        self.gym.add_lines(self.viewer, self.env.envs[env_idx], 1, np.array([px, py, pz-d, px, py, pz+d], dtype=np.float32), color)
+
+    def draw_sequential_reaching_debug(self, hint_pos, optimal_pos, gripper_pos, env_idx=0):
+        """
+        Draw debug info for sequential reaching reward.
+        hint_pos: [3] Tensor
+        optimal_pos: [3] Tensor
+        gripper_pos: [3] Tensor
+        """
+        if not self.viewer:
+            return
+            
+        # Ensure inputs are on CPU numpy
+        if isinstance(hint_pos, torch.Tensor): hint_pos = hint_pos.cpu().numpy()
+        if isinstance(optimal_pos, torch.Tensor): optimal_pos = optimal_pos.cpu().numpy()
+        if isinstance(gripper_pos, torch.Tensor): gripper_pos = gripper_pos.cpu().numpy()
+        
+        # 1. Draw Path (Hint -> Optimal) - Cyan Line
+        self.gym.add_lines(self.viewer, self.env.envs[env_idx], 1, 
+                           np.array([hint_pos[0], hint_pos[1], hint_pos[2], 
+                                     optimal_pos[0], optimal_pos[1], optimal_pos[2]], dtype=np.float32), 
+                           np.array([0, 1, 1], dtype=np.float32))
+        
+        # 2. Calculate Closest Point (2D Logic to match reward)
+        # We only consider X, Y for the projection, ignoring Z.
+        v_path = optimal_pos - hint_pos
+        v_path_2d = v_path[:2]
+        len_sq_2d = np.sum(v_path_2d**2)
+        
+        v_gripper = gripper_pos - hint_pos
+        v_gripper_2d = v_gripper[:2]
+        
+        t = np.sum(v_gripper_2d * v_path_2d) / (len_sq_2d + 1e-6)
+        t_clamped = np.clip(t, 0.0, 1.0)
+        
+        # Point on the 3D line
+        p_closest = hint_pos + t_clamped * v_path
+        
+        # 3. Draw Closest Point - Magenta Cross
+        d = 0.03
+        px, py, pz = p_closest
+        color_closest = np.array([1, 0, 1], dtype=np.float32)
+        self.gym.add_lines(self.viewer, self.env.envs[env_idx], 1, np.array([px-d, py, pz, px+d, py, pz], dtype=np.float32), color_closest)
+        self.gym.add_lines(self.viewer, self.env.envs[env_idx], 1, np.array([px, py-d, pz, px, py+d, pz], dtype=np.float32), color_closest)
+        self.gym.add_lines(self.viewer, self.env.envs[env_idx], 1, np.array([px, py, pz-d, px, py, pz+d], dtype=np.float32), color_closest)
+        
+        # 4. Draw Error Line (Gripper -> Closest) - Red Line
+        self.gym.add_lines(self.viewer, self.env.envs[env_idx], 1,
+                           np.array([gripper_pos[0], gripper_pos[1], gripper_pos[2],
+                                     p_closest[0], p_closest[1], p_closest[2]], dtype=np.float32),
+                           np.array([1, 0, 0], dtype=np.float32))
+
+    def draw_target_points(self, local_points, object_pos, object_quat, num_vis_points, env_idx=0):
+        """
+        Downsample and draw target points in world frame.
+        local_points: [N, 3] Tensor (all points)
+        object_pos: [3] Tensor
+        object_quat: [4] Tensor
+        num_vis_points: int
+        """
+        if not self.viewer:
+            return
+            
+        num_points = local_points.shape[0]
+        stride_size = int(num_points // num_vis_points)
+        if stride_size < 1:
+            stride_size = 1
+            
+        points_local_sample = local_points[::stride_size]
+        
+        # Transform to world frame
+        points_world_sample = quat_apply(
+            object_quat.unsqueeze(0).expand(points_local_sample.shape[0], -1), 
+            points_local_sample
+        ) + object_pos
+        
+        self.draw_3d_lines(points_world_sample, color=[0, 0, 1], env_idx=env_idx)
+        return points_world_sample
 
     def draw_head_tail_points(self, head_pos, tail_pos, env_idx=0):
         """
@@ -144,11 +400,12 @@ class VisualizationUtils:
         
         return u, v, (z > 0.1)
 
-    def draw_2d_image(self, points_3d_dict, camera_sensor, env_idx=0, filename="debug_cam.png", save_images=False, points_2d_dict=None):
+    def draw_2d_image(self, points_3d_dict, camera_sensor, env_idx=0, filename="debug_cam.png", save_images=False, points_2d_dict=None, lines_3d_dict=None):
         """
         Get camera image from Isaac Gym, overlay projected points, and save or display.
         points_3d_dict: Dict of {"label": points_tensor_3d}
         points_2d_dict: Dict of {"label": points_tensor_2d} (normalized [0, 1])
+        lines_3d_dict: Dict of {"label": points_tensor_3d (2, 3)} - Start and End points of lines
         """
         # Get dimensions from config
         h = camera_sensor.cfg.intrinsics.img_height
@@ -172,6 +429,7 @@ class VisualizationUtils:
             "target": (0, 255, 0), # Green
             "sigma_3d": (255, 0, 0),  # Red
             "sigma_2d": (255, 255, 255), # White
+            "y_spread": (0, 255, 255), # Yellow
             "other": (0, 0, 255)   # Blue
         }
         
@@ -206,6 +464,21 @@ class VisualizationUtils:
                             cv2.circle(image, (u, v), 2, color, 2)
                         else:
                             cv2.drawMarker(image, (u, v), color, markerType=cv2.MARKER_CROSS, markerSize=6, thickness=2)
+
+        # Draw 3D Lines
+        if lines_3d_dict:
+            for label, points in lines_3d_dict.items():
+                if points is None: continue
+                # points should be [2, 3] (start, end)
+                u, v, mask = self.project_points_to_image(points, camera_sensor, env_idx)
+                u = u.cpu().numpy()
+                v = v.cpu().numpy()
+                mask = mask.cpu().numpy()
+                color = colors.get(label, (0, 255, 255))
+                if mask[0] and mask[1]:
+                    p1 = (int(u[0]), int(v[0]))
+                    p2 = (int(u[1]), int(v[1]))
+                    cv2.line(image, p1, p2, color, 2)
 
         image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
         

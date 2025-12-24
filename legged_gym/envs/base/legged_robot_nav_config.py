@@ -99,6 +99,9 @@ class LeggedRobotNavCfg(LeggedRobotCfg):
             orientation = -0.2
             conditional_alignment = 0.5
             conditional_perpendicular_penalty = -0.5
+            visual_foreshortening = 0.5
+            visual_foreshortening_2d = 0.5
+            optimal_pose_tracking = 1.0
 
     class normalization:
         class obs_scales:

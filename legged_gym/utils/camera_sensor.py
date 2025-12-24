@@ -78,12 +78,15 @@ class CameraSensor:
             tan_func = np.tan
             pi_val = np.pi
 
-        # fx = W / (2 * tan(HFOV / 2))
-        self.fx = self.img_width / (2 * tan_func(self.horizontal_fov / 2 * pi_val / 180))
+        # # fx = W / (2 * tan(HFOV / 2))
+        # self.fx = self.img_width / (2 * tan_func(self.horizontal_fov / 2 * pi_val / 180))
         
-        # fy: Isaac Gym uses linear VFOV scaling: VFOV = (H/W) * HFOV
-        self.vertical_fov = (self.img_height / self.img_width) * self.horizontal_fov
-        self.fy = self.img_height / (2 * tan_func(self.vertical_fov / 2 * pi_val / 180))
+        # # fy: Isaac Gym uses linear VFOV scaling: VFOV = (H/W) * HFOV
+        # # self.vertical_fov = (self.img_height / self.img_width) * self.horizontal_fov
+        # self.fy = self.img_height / (2 * tan_func(self.vertical_fov / 2 * pi_val / 180))
+
+        self.fx = self.intrinsics_cfg.fx
+        self.fy = self.intrinsics_cfg.fy
         
         self.cx = self.img_width / 2
         self.cy = self.img_height / 2

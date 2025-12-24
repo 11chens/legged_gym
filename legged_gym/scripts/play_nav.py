@@ -61,8 +61,8 @@ def play(args):
     env: LeggedRobotNav
     env_cfg: Go2NavFlatCfg
 
-    # args.load_run = '12_08_22-24-56_'
-    # args.checkpoint = 1000
+    args.load_run = '12_24_17-57-55_'
+    # args.checkpoint = 2000
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     # override some parameters for testing
     env_cfg.env.num_envs = 1
@@ -133,10 +133,10 @@ def play(args):
 
         # print(f"vel: ({vx:.2f}, {vy:.2f}, {vyaw:.2f}, {pitch:.2f})")
         # print(f"P_img: (u:{u:.2f}, v:{v:.2f}, d:{depth:.2f})")
-        print(f"Command: (u_c:{u_c:.2f}, v_c:{v_c:.2f}, d_c:{depth_c:.2f})")
-        print(f"Action: (cx: {cx:.2f}, cy: {cy:.2f}, cyaw: {cyaw:.2f}, cpitch: {cpitch:.2f})")
-        print(f"Base: ({vx:.2f}, {vy:.2f}, {vyaw:.2f}, {pitch:.2f})")
-        print(f"Distance: ({distance:.2f})")
+        # print(f"Command: (u_c:{u_c:.2f}, v_c:{v_c:.2f}, d_c:{depth_c:.2f})")
+        # print(f"Action: (cx: {cx:.2f}, cy: {cy:.2f}, cyaw: {cyaw:.2f}, cpitch: {cpitch:.2f})")
+        # print(f"Base: ({vx:.2f}, {vy:.2f}, {vyaw:.2f}, {pitch:.2f})")
+        # print(f"Distance: ({distance:.2f})")
         
 if __name__ == '__main__':
     EXPORT_ONNX = True

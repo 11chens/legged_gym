@@ -12,13 +12,19 @@ class TargetCfg:
         radius_range = [0.03, 0.05]
         height_range = [0.15, 0.25]
         dims_range = [[0.04, 0.06], [0.15, 0.25], [0.04, 0.06]] # [min, max] for x, y, z
-
+        
+        # Box dimensions for Place task (Large Cuboid)
+        box_dims_range = [[0.2, 0.4], [0.2, 0.4], [0.2, 0.6]] # [min, max] for x, y, z
+        
+        # Place Task Parameters
+        place_clearance = 0.1 # [m] Height above the box edge for release
+        
         # For mixed
         types = ["cylinder", "cuboid", "sphere"]
         
     class perception:
         num_sample_points = 1000
-        frame = "base" # "base", "camera", "image"
+        frame = "image" # "base", "camera", "image"
         use_geometric_weight = True
         debug_timer = False
         debug_info = False
@@ -27,6 +33,7 @@ class TargetCfg:
         # Randomization ranges
         pos_x_range = [1.0, 3.0] # Distance from robot
         pos_y_range = [-1.0, 1.0]
+        place_prob = 0.4  # Probability of Place task
         
         # Orientation randomization
         randomize_orientation = True

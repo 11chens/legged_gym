@@ -171,7 +171,7 @@ class PCATargetTracker:
         
         # 6. PCA (3D): mean_3d: [num_envs, 3], eigvals_3d: [num_envs, 3], eigvecs_3d: [num_envs, 3, 3], valid_3d: [num_envs]
         mean_3d, eigvals_3d, eigvecs_3d, valid_3d = compute_weighted_pca(points_world, weights)
-        # 7. Generate 3D Sigma Points: sigma_points_3d: [num_envs, 5, 3] in World Frame
+        # 7. Generate 3D Sigma Points: sigma_points_3d: [num_envs, 7, 3] in World Frame
         sigma_points_3d = generate_sigma_points(mean_3d, eigvals_3d, eigvecs_3d, alpha=1.5)
         
         # Combine validity

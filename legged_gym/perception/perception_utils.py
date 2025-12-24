@@ -152,8 +152,7 @@ def compute_weighted_pca(points, weights):
 
 def generate_sigma_points(mean, eigvals, eigvecs, alpha=2.0):
     """
-    Generate 5 sigma points from PCA results using the top 2 principal components.
-    Note: Even for 3D data, this only uses the 2 largest eigenvalues/vectors.
+    Generate 2*dim + 1 sigma points from PCA results using all principal components.
     
     Args:
         mean (Tensor): [num_envs, dim]
@@ -162,31 +161,32 @@ def generate_sigma_points(mean, eigvals, eigvecs, alpha=2.0):
         alpha (float): Scaling factor
         
     Returns:
-        sigma_points (Tensor): [num_envs, 5, dim]
+        sigma_points (Tensor): [num_envs, 2*dim + 1, dim]
         # Point 0: Mean
-        # Point 1: Mean + alpha * sqrt(lam_long) * v_long
-        # Point 2: Mean - alpha * sqrt(lam_long) * v_long
-        # Point 3: Mean + alpha * sqrt(lam_short) * v_short
-        # Point 4: Mean - alpha * sqrt(lam_short) * v_short
+        # Point 1, 2: Mean +/- alpha * sqrt(lam_1) * v_1 (Largest)
+        # Point 3, 4: Mean +/- alpha * sqrt(lam_2) * v_2 (2nd Largest)
+        # ...
     """
+    dim = mean.shape[1]
+    
     # Clamp eigenvalues to be non-negative
     eigvals = torch.clamp(eigvals, min=1e-6)
     
-    # Identify principal axes (last one is largest)
-    # Long axis (Largest eigenvalue)
-    v_long = eigvecs[:, :, -1] # [N, dim]
-    l_long = torch.sqrt(eigvals[:, -1:]) # [N, 1]
+    points = [mean]
     
-    # Short axis (Second largest eigenvalue)
-    v_short = eigvecs[:, :, -2] # [N, dim]
-    l_short = torch.sqrt(eigvals[:, -2:-1]) # [N, 1]
+    # Iterate from largest eigenvalue to smallest (descending importance)
+    # eigvals are ascending, so iterate backwards
+    for i in range(dim):
+        idx = dim - 1 - i
+        v = eigvecs[:, :, idx] # [N, dim]
+        l = torch.sqrt(eigvals[:, idx:idx+1]) # [N, 1]
+        
+        p_plus = mean + alpha * l * v
+        p_minus = mean - alpha * l * v
+        
+        points.append(p_plus)
+        points.append(p_minus)
     
-    p0 = mean
-    p1 = mean + alpha * l_long * v_long
-    p2 = mean - alpha * l_long * v_long
-    p3 = mean + alpha * l_short * v_short
-    p4 = mean - alpha * l_short * v_short
-    
-    sigma_points = torch.stack([p0, p1, p2, p3, p4], dim=1) # [N, 5, dim]
+    sigma_points = torch.stack(points, dim=1) # [N, 2*dim+1, dim]
     
     return sigma_points
