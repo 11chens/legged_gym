@@ -161,6 +161,10 @@ def get_args(custom_args=None):
         {"name": "--load_run", "type": str,  "help": "Name of the run to load when resume=True. If -1: will load the last run. Overrides config file if provided."},
         {"name": "--checkpoint", "type": int,  "help": "Saved model checkpoint number. If -1: will load the last checkpoint. Overrides config file if provided."},
         {"name": "--debug", "action": "store_true", "default": False,  "help": "Enable debug mode."},
+        {"name": "--onnx", "action": "store_true", "default": False, "help": "Export and run the ONNX model."},
+        {"name": "--video", "action": "store_true", "default": False, "help": "Record video during play."},
+        {"name": "--npz", "action": "store_true", "default": False, "help": "Record npz data during play."},
+        {"name": "--video_fpv", "action": "store_true", "default": False, "help": "Record first-person-view video during play."},
 
         {"name": "--headless", "action": "store_true", "default": False, "help": "Force display off at all times"},
         {"name": "--horovod", "action": "store_true", "default": False, "help": "Use horovod for multi-gpu training"},

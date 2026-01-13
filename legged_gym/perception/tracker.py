@@ -1,7 +1,7 @@
 import torch
 import time
 from .surface_geometry import SurfaceShape, Sphere, Cuboid, Cylinder
-from .perception_utils import compute_visibility_weights, project_points, compute_weighted_pca, generate_sigma_points
+from .perception_utils import compute_visibility_weights, project_points, compute_weighted_pca, generate_sigma_points, generate_structured_noisy_sigma_points
 from isaacgym.torch_utils import quat_apply
 
 class PCATargetTracker:
@@ -119,7 +119,7 @@ class PCATargetTracker:
         return points_world, normals_world
 
 
-    def compute_features(self, object_pos, object_quat, camera_params, camera_transform, use_geometric_weight=True, debug_timer=False, debug_info=False):
+    def compute_features(self, object_pos, object_quat, camera_params, camera_transform, use_geometric_weight=True, noise_params=None, debug_timer=False, debug_info=False):
         """
         Computes PCA features for the tracked object.
         
@@ -129,6 +129,7 @@ class PCATargetTracker:
             camera_params (dict): Camera intrinsics.
             camera_transform (dict): Camera extrinsics ('R', 'T').
             use_geometric_weight (bool): Whether to use geometric weighting for anti-drift.
+            noise_params (dict, optional): Dict containing structured noise scales.
             debug_timer (bool): If True, prints timing info.
             debug_info (bool): If True, prints detailed debug information.
             
@@ -139,7 +140,7 @@ class PCATargetTracker:
             eigvecs_2d (Tensor): [num_envs, 2, 2]
             weights (Tensor): [num_envs, num_points, 1] Visibility weights.
             points_2d (Tensor): [num_envs, num_points, 2] Projected points.
-            sigma_points_3d (Tensor): [num_envs, 5, 3]
+            sigma_points_3d (Tensor): [num_envs, 7, 3]
             is_valid (Tensor): [num_envs] Validity flag.
         """
         t0 = time.time()
@@ -165,14 +166,47 @@ class PCATargetTracker:
         
         # 4. PCA (2D): mean_2d: [num_envs, 2], eigvals_2d: [num_envs, 2], eigvecs_2d: [num_envs, 2, 2], valid_2d: [num_envs]
         mean_2d, eigvals_2d, eigvecs_2d, valid_2d = compute_weighted_pca(points_2d, weights)
+        
         # 5. Generate 2D Sigma Points: sigma_points_2d: [num_envs, 5, 2] in Image Plane
-        sigma_points_2d = generate_sigma_points(mean_2d, eigvals_2d, eigvecs_2d, alpha=1.5)
+        if noise_params is not None:
+            sigma_points_2d = generate_structured_noisy_sigma_points(
+                mean_2d, eigvals_2d, eigvecs_2d, 
+                pos_noise=noise_params.get('pos_2d', 0),
+                scale_noise=noise_params.get('scale_2d', 0),
+                rot_noise=noise_params.get('rot_2d', 0),
+                alpha=2.0
+            )
+        else:
+            sigma_points_2d = generate_sigma_points(mean_2d, eigvals_2d, eigvecs_2d, alpha=2.0)
+
         t4 = time.time()
         
-        # 6. PCA (3D): mean_3d: [num_envs, 3], eigvals_3d: [num_envs, 3], eigvecs_3d: [num_envs, 3, 3], valid_3d: [num_envs]
-        mean_3d, eigvals_3d, eigvecs_3d, valid_3d = compute_weighted_pca(points_world, weights)
-        # 7. Generate 3D Sigma Points: sigma_points_3d: [num_envs, 7, 3] in World Frame
-        sigma_points_3d = generate_sigma_points(mean_3d, eigvals_3d, eigvecs_3d, alpha=1.5)
+        # 6. PCA (3D): Performed in CAMERA FRAME to apply anisotropic depth noise correctly
+        R_cam = camera_transform['R'] # [N, 3, 3] World to Camera
+        T_cam = camera_transform['T'] # [N, 3] Camera position in World frame
+        
+        # Transform points_world to Camera Frame
+        # P_cam = R_cam * (P_world - T_cam)
+        points_camera = torch.matmul(R_cam.unsqueeze(1), (points_world - T_cam.unsqueeze(1)).unsqueeze(-1)).squeeze(-1)
+        
+        # mean_3d_cam: [num_envs, 3], eigvals_3d: [num_envs, 3], eigvecs_3d: [num_envs, 3, 3]
+        mean_3d_cam, eigvals_3d, eigvecs_3d, valid_3d = compute_weighted_pca(points_camera, weights)
+        
+        # 7. Generate 3D Sigma Points in CAMERA FRAME with structured noise
+        if noise_params is not None:
+            sigma_points_3d_cam = generate_structured_noisy_sigma_points(
+                mean_3d_cam, eigvals_3d, eigvecs_3d,
+                pos_noise=noise_params.get('pos_3d', 0),
+                scale_noise=noise_params.get('scale_3d', 0),
+                rot_noise=noise_params.get('rot_3d', 0),
+                alpha=2.0
+            )
+        else:
+            sigma_points_3d_cam = generate_sigma_points(mean_3d_cam, eigvals_3d, eigvecs_3d, alpha=2.0)
+        
+        # Transform noisy sigma points back to World Frame (to maintain tracker output consistency)
+        # P_world = R_cam^T * P_cam + T_cam
+        sigma_points_3d = torch.matmul(R_cam.transpose(1, 2).unsqueeze(1), sigma_points_3d_cam.unsqueeze(-1)).squeeze(-1) + T_cam.unsqueeze(1)
         
         # Combine validity
         is_valid = valid_2d & valid_3d

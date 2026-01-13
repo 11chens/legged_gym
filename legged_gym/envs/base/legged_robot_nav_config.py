@@ -73,7 +73,6 @@ class LeggedRobotNavCfg(LeggedRobotCfg):
         position_target_sigma_soft = 2.0
         position_target_sigma_tight = 0.5
         heading_target_sigma = 1.0
-        rew_duration = 2.0
         soft_dof_vel_limit = 0.9
         soft_torque_limit = 0.85
         max_contact_force = 100.
@@ -101,7 +100,6 @@ class LeggedRobotNavCfg(LeggedRobotCfg):
             conditional_perpendicular_penalty = -0.5
             visual_foreshortening = 0.5
             visual_foreshortening_2d = 0.5
-            optimal_pose_tracking = 1.0
 
     class normalization:
         class obs_scales:

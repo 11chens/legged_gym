@@ -35,9 +35,9 @@ class VisualizationUtils:
         else:
             points = sigma_points
             
-        # Draw White Crosses for 3D Sigma Points
-        d = 0.01 # 1cm size
-        color = np.array([1, 1, 1], dtype=np.float32) # White
+        # Draw Red Crosses for 3D Sigma Points
+        d = 0.02 # 2cm size
+        color = np.array([1, 0, 0], dtype=np.float32) # Red
         
         for i in range(points.shape[0]):
             px, py, pz = points[i]
@@ -441,7 +441,7 @@ class VisualizationUtils:
                 u = u.cpu().numpy()
                 v = v.cpu().numpy()
                 mask = mask.cpu().numpy()
-                color = colors.get(label, (0, 255, 0))
+                color = colors.get(label, (0, 255, 0)) # Default Green
                 for i in range(len(u)):
                     if mask[i]:
                         cv2.circle(image, (int(u[i]), int(v[i])), 3, color, -1)
@@ -455,7 +455,7 @@ class VisualizationUtils:
                 else:
                     pts = points
                 
-                color = colors.get(label, (255, 255, 0))
+                color = colors.get(label, (255, 255, 0)) # Default Yellow
                 for i in range(len(pts)):
                     u = int(pts[i, 0] * w)
                     v = int(pts[i, 1] * h)
@@ -480,12 +480,14 @@ class VisualizationUtils:
                     p2 = (int(u[1]), int(v[1]))
                     cv2.line(image, p1, p2, color, 2)
 
-        image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        image_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
         
         if save_images:
             path = os.path.join(self.save_dir, filename)
-            cv2.imwrite(path, image)
+            cv2.imwrite(path, image_bgr)
         elif not self.env.headless:
-            cv2.imshow("Camera Debug", image)
+            cv2.imshow("Camera Debug", image_bgr)
             cv2.waitKey(1)
+
+        return image_bgr
 

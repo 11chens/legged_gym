@@ -190,3 +190,123 @@ def generate_sigma_points(mean, eigvals, eigvecs, alpha=2.0):
     sigma_points = torch.stack(points, dim=1) # [N, 2*dim+1, dim]
     
     return sigma_points
+
+def generate_structured_noisy_sigma_points(mean, eigvals, eigvecs, pos_noise=0.0, scale_noise=0.0, rot_noise=0.0, alpha=2.0):
+    """
+    Generate sigma points with structured parametric noise.
+    Supports anisotropic position noise and Rodrigues-based rotation perturbation.
+    Specifically simulates depth camera characteristics (RealSense) where depth noise 
+    propagates along the ray and couples with scale to preserve 2D projection.
+    
+    Args:
+        mean: [B, dim] Weighted mean
+        eigvals: [B, dim] Eigenvalues (ascending)
+        eigvecs: [B, dim, dim] Eigenvectors (columns)
+        pos_noise: Scalar or [dim] Tensor, additive noise level for mean
+        scale_noise: Scalar, multiplicative noise level for sqrt(eigvals)
+        rot_noise: Scalar, rotation noise level for eigenvectors (rad)
+        alpha: Scaling factor for sigma points
+    """
+    dim = mean.shape[1]
+    B = mean.shape[0]
+    device = mean.device
+
+    scale_coupling_ratio = 1.0
+
+    # 1. Positional Noise (Additive & Ray-aligned for Sim2Real)
+    if isinstance(pos_noise, (torch.Tensor, list)):
+        if not isinstance(pos_noise, torch.Tensor):
+            pos_noise = torch.tensor(pos_noise, device=device)
+        
+        if dim == 3 and pos_noise.shape[-1] >= 3:
+            # Ray-aligned noise: Simulate D435i characteristics
+            # Z-noise is high, but it propagates along the ray so U,V remains stable.
+            dist_gt = torch.norm(mean, dim=-1, keepdim=True) + 1e-6
+            
+            noise_vec = torch.randn_like(mean) * pos_noise
+            
+            # Extract Z noise (Depth Drift: e.g. 0.5m)
+            dz = noise_vec[:, 2:3]
+            
+            # Propagate Z noise along the ray: P_noisy = P_gt * (Z_gt + dZ) / Z_gt
+            # This mathematically ensures X_noisy/Z_noisy == X_gt/Z_gt (constant U,V)
+            # Center noisy position
+            mean_noisy = mean * (1.0 + dz / (torch.abs(mean[:, 2:3]) + 1e-6))
+            
+            # [Depth-Scale Coupling Fix]
+            # Calculate the ratio between noisy distance and GT distance to scale extent accordingly
+            dist_noisy = torch.norm(mean_noisy, dim=-1, keepdim=True) + 1e-6
+            scale_coupling_ratio = dist_noisy / dist_gt
+
+            # Apply small residual XY jitter (shaking in 2D, e.g. 5mm) to the noisy mean
+            mean = mean_noisy
+            mean[:, :2] = mean[:, :2] + noise_vec[:, :2]
+        else:
+            mean = mean + torch.randn_like(mean) * pos_noise
+    elif pos_noise > 0:
+        # Standard Gaussian additive noise
+        mean = mean + torch.randn_like(mean) * pos_noise
+
+    # 2. Scale Noise (Multiplicative to sqrt(lambda))
+    scales = torch.sqrt(torch.clamp(eigvals, min=1e-6))
+    
+    # Apply Depth-Scale Coupling: if depth is pushed far, scale up to maintain pixel size
+    scales = scales * scale_coupling_ratio
+
+    if scale_noise > 0:
+        # Using normal distribution for simulated real-world feeling
+        # This is the residual random jitter in mask estimation (e.g. 5%)
+        scale_factor = 1.0 + torch.randn_like(scales, device=device) * scale_noise
+        scales = scales * torch.clamp(scale_factor, min=0.1) # Avoid negative or near-zero scales
+
+    # 3. Rotation Noise (Perturb eigenvectors)
+    if rot_noise > 0:
+        if dim == 3:
+            # 3D: Apply Rodrigues perturbation to the whole rotation matrix
+            # Generate random rotation axis
+            rand_axis = torch.randn((B, 3), device=device)
+            rand_axis = rand_axis / (torch.norm(rand_axis, dim=-1, keepdim=True) + 1e-6)
+            
+            # Generate random rotation angle
+            rand_angle = torch.randn((B, 1), device=device) * rot_noise
+            
+            # Skew-symmetric matrix K
+            K = torch.zeros((B, 3, 3), device=device)
+            K[:, 0, 1] = -rand_axis[:, 2]
+            K[:, 0, 2] =  rand_axis[:, 1]
+            K[:, 1, 0] =  rand_axis[:, 2]
+            K[:, 1, 2] = -rand_axis[:, 0]
+            K[:, 2, 0] = -rand_axis[:, 1]
+            K[:, 2, 1] =  rand_axis[:, 0]
+            
+            I = torch.eye(3, device=device).unsqueeze(0).repeat(B, 1, 1)
+            # Rodrigues Formula: R_perturb = I + sin(theta)K + (1-cos(theta))K^2
+            sin_theta = torch.sin(rand_angle).unsqueeze(-1)
+            cos_theta = torch.cos(rand_angle).unsqueeze(-1)
+            R_perturb = I + sin_theta * K + (1 - cos_theta) * torch.bmm(K, K)
+            
+            # Apply perturbation: V_noisy = V_gt @ R_perturb
+            eigvecs = torch.bmm(eigvecs, R_perturb)
+            
+        elif dim == 2:
+            # 2D: Perturb the dominant axis angle
+            v1_gt = eigvecs[:, :, 1] # Largest axis for dim=2
+            theta = torch.atan2(v1_gt[:, 1], v1_gt[:, 0])
+            theta_noisy = theta + torch.randn_like(theta) * rot_noise
+            
+            c = torch.cos(theta_noisy)
+            s = torch.sin(theta_noisy)
+            v1 = torch.stack([c, s], dim=-1)
+            v2 = torch.stack([-s, c], dim=-1) # Perpendicular
+            eigvecs = torch.stack([v2, v1], dim=2)
+
+    # 4. Synthesize Points
+    points = [mean]
+    for i in range(dim):
+        idx = dim - 1 - i
+        v = eigvecs[:, :, idx]
+        l = scales[:, idx:idx+1]
+        points.append(mean + alpha * l * v)
+        points.append(mean - alpha * l * v)
+    
+    return torch.stack(points, dim=1)
