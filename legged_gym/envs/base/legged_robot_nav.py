@@ -50,7 +50,7 @@ from legged_gym.envs.go2.go2_nav_config import Go2NavFlatCfg
 from .legged_robot import LeggedRobot
 from legged_gym.utils.camera_sensor import CameraSensor
 from legged_gym.perception.tracker import PCATargetTracker
-from legged_gym.perception.surface_geometry import Cylinder, Cuboid, Sphere
+from legged_gym.perception.surface_geometry import Cylinder, Cuboid, Sphere, Box, Ellipsoid
 from legged_gym.utils.visualization import VisualizationUtils
 
 class LeggedRobotNav(LeggedRobot):
@@ -78,7 +78,9 @@ class LeggedRobotNav(LeggedRobot):
         self.shapes = {
             "cylinder": Cylinder(self.device),
             "cuboid": Cuboid(self.device),
-            "sphere": Sphere(self.device)
+            "sphere": Sphere(self.device),
+            "box": Box(self.device),
+            "ellipsoid": Ellipsoid(self.device)
         }
         
         self.object_dims = torch.zeros(self.num_envs, 3, device=self.device)
@@ -172,7 +174,8 @@ class LeggedRobotNav(LeggedRobot):
             update vars: self.obs_buf -> nav_polciy
         """
         super()._init_buffers()
-                
+        
+        self.task_id = torch.zeros(self.num_envs, 1, dtype=torch.float, device=self.device, requires_grad=False)
         self.P_base = torch.zeros(self.num_envs, self.cfg.env.num_position, dtype=torch.float, device=self.device, requires_grad=False)
         self.distance = torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
         self.objct_z = torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
@@ -183,7 +186,7 @@ class LeggedRobotNav(LeggedRobot):
         self.max_dim_vals = torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
         self.max_dim_inds = torch.zeros(self.num_envs, dtype=torch.long, device=self.device, requires_grad=False)
         self.out_of_view_timer = torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
-        self.out_of_view_drift = torch.zeros(self.num_envs, self.cfg.env.num_sigma_points, 3, device=self.device)
+        self.out_of_view_drift = torch.zeros(self.num_envs, 1, 3, device=self.device)
         
         self.physically_out_of_view = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device, requires_grad=False)
         
@@ -236,6 +239,7 @@ class LeggedRobotNav(LeggedRobot):
         self.nav_actions = torch.zeros(self.num_envs, self.cfg.env.num_nav_actions, dtype=torch.float, device=self.device, requires_grad=False)
         self.last_orig_nav_actions = torch.zeros(self.num_envs, self.cfg.env.num_nav_actions, dtype=torch.float, device=self.device, requires_grad=False)
         self.last_dof_actions = torch.zeros(self.num_envs, 12, dtype=torch.float, device=self.device, requires_grad=False)
+        self.place_offset = torch.zeros((self.num_envs, 1), device=self.device)
 
         self.nav_actions_buffer = torch.zeros(self.num_envs, self.cfg.env.history_len, self.cfg.env.num_nav_actions, dtype=torch.float, device=self.device, requires_grad=False)
         self.nav_commands_buffer = torch.zeros(self.num_envs, self.cfg.env.nav_history_len*2, self.cfg.commands.num_nav_commands, dtype=torch.float, device=self.device, requires_grad=False)
@@ -248,13 +252,17 @@ class LeggedRobotNav(LeggedRobot):
         self.current_perceived_obs = torch.zeros(self.num_envs, self.cfg.env.num_props, dtype=torch.float, device=self.device, requires_grad=False)
         
         self.alpha = torch.zeros(self.num_envs, 1, dtype=torch.float, device=self.device)
+        self.sigma_points_alpha = torch.zeros(self.num_envs, 1, dtype=torch.float, device=self.device)
+        self.dummy_sigma_points_offset = torch.zeros(self.num_envs, 3, device=self.device)
+        self.vis_weights = torch.zeros(self.num_envs, self.cfg.target.perception.num_sample_points, 1, device=self.device)
+        self.is_valid = torch.ones(self.num_envs, dtype=torch.bool, device=self.device, requires_grad=False)
 
         self.euler_rpy = torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device, requires_grad=False)
         self.base_lin_vel_pred = torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device, requires_grad=False)
         self.loco_obs_buf = torch.zeros(
-                self.num_envs, 47, device=self.device, dtype=torch.float)
+                self.num_envs, self.cfg.loco.loco_obs_dim, device=self.device, dtype=torch.float)
         self.loco_obs_hist = torch.zeros(
-                self.num_envs, 10, 47, device=self.device, dtype=torch.float)  
+                self.num_envs, self.cfg.loco.loco_history_len, self.cfg.loco.loco_obs_dim, device=self.device, dtype=torch.float)  
 
         self.loco_obs_noise_vec = self._get_loco_obs_noise_scale_vec()
 
@@ -269,7 +277,7 @@ class LeggedRobotNav(LeggedRobot):
         """ load loco policy, which is used to compute loco actions from nav actions
             the loco policy is a slr policy, which is trained with proprioception
         """
-        self.loco_body = torch.jit.load('controller/pitch/model.jit')
+        self.loco_body = torch.jit.load(self.cfg.loco.loco_body_model_file)
         self.loco_body =  self.loco_body.to(self.device)
 
     def _compute_actions(self, nav_actions):
@@ -417,6 +425,19 @@ class LeggedRobotNav(LeggedRobot):
         alpha_indices = torch.randint(0, len(alpha_values), (len(env_ids),), device=self.device)
         self.alpha[env_ids] = alpha_values[alpha_indices].unsqueeze(1)
         
+        # Resample sigma points alpha
+        sp_alpha_range = self.cfg.target.perception.alpha_range
+        self.sigma_points_alpha[env_ids] = torch_rand_float(sp_alpha_range[0], sp_alpha_range[1], (len(env_ids), 1), device=self.device)
+
+        # Resample dummy sigma points offset (constant bias per episode)
+        # Randomly sample offset in [-0.15, 0.15]m for X, Y, Z
+        dummy_offset_scale = self.cfg.commands.dummy_sigma_offset
+        self.dummy_sigma_points_offset[env_ids] = torch_rand_float(-dummy_offset_scale, dummy_offset_scale, (len(env_ids), 3), device=self.device)
+        
+        place_offset_scale = self.cfg.commands.place_offset_value
+        place_offset_error_margin = self.cfg.commands.place_offset_error_margin
+        self.place_offset[env_ids] = torch_rand_float(place_offset_scale - place_offset_error_margin, place_offset_scale + place_offset_error_margin, (len(env_ids), 1), device=self.device)
+
         # Resample latency steps
         if self.cfg.commands.enable_delay:
             dt_ms = self.dt * 1000
@@ -527,7 +548,7 @@ class LeggedRobotNav(LeggedRobot):
         """ origin: loco policy (dim12) -> act2tq
             new: nav policy (dim 3): loco_cmds -> act (dim 12)
         """
-        # _compute_actions: loco_cmds -> loco_actions
+        # nav_actions: vx, vy, vyaw, pitch, gripper_state
         nav_actions = torch.clip(nav_actions, min=-3.0, max=3.0)
         self.orig_nav_actions = nav_actions.to(self.device)
         nav_actions_after_clip = torch.clip(self.orig_nav_actions, min=self.nav_clip_min, max=self.nav_clip_max)
@@ -575,6 +596,7 @@ class LeggedRobotNav(LeggedRobot):
         self.euler_rpy[:, 1] = wrap_to_pi(pitch)
         self.euler_rpy[:, 2] = wrap_to_pi(yaw)
 
+
         self._post_physics_step_callback()
 
         # compute observations, rewards, resets, ...
@@ -615,7 +637,7 @@ class LeggedRobotNav(LeggedRobot):
         # 1. Distance Check (Close to Optimal Grasp Pose)
         is_at_target = torch.logical_and(self.d_goal_err_x < 0.05, self.d_goal_err_y < 0.03) # 3cm tolerance
         self.near_target = torch.logical_and(self.d_goal_err_x < 0.03, self.d_goal_err_y < 0.03)
-        self.far_target = torch.logical_or(self.d_goal_err_x >= 0.15, self.d_goal_err_y > 0.03)
+        self.far_target = torch.logical_or(self.d_goal_err_x >= 0.2, self.d_goal_err_y > 0.05)
 
         # 2. Orientation Alignment
         # is_aligned = self.yaw_err < 0.1 # ~5.7 degrees tolerance
@@ -623,7 +645,8 @@ class LeggedRobotNav(LeggedRobot):
                         self.is_place * ( (self.yaw_err < 0.1) & (self.pitch_err < 0.15) )
         self.is_success_state = is_at_target & is_aligned
         
-        is_far_from_target = torch.logical_or(self.d_goal_err_x >= 0.1, self.d_goal_err_y >= 0.1)
+        is_far_from_target = self.is_pick * torch.logical_or(self.d_goal_err_x >= 0.1, self.d_goal_err_y >= 0.1) + \
+                                self.is_place * torch.logical_or(self.d_goal_err_x >= 0.2, self.d_goal_err_y >= 0.1)
         is_far_from_aligned = self.is_pick * self.obj_is_too_long & (self.yaw_err >= 0.2) + \
                                 self.is_place * ( (self.yaw_err >= 0.2) | (self.pitch_err >= 0.2) )
         self.is_failure_state = self.time_out_buf & (is_far_from_target | is_far_from_aligned)
@@ -634,50 +657,6 @@ class LeggedRobotNav(LeggedRobot):
         # Terminate only after holding for 1 seconds
         self.reach_goal = self.success_timer > self.cfg.commands.hold_time_s
 
-    # def _compute_object_center_map(self):
-    #     """ Compute the object center in base frame, camera frame and image plane
-    #         Check if out of view, and apply out-of-view drift if enabled
-    #     """
-    #     # pos in world -> pos in robot
-    #     pos_diff = self.object_pos - self.root_states[:, 0:3]
-    #     self.P_base = quat_rotate_inverse(self.base_quat, pos_diff)
-    #     # compute goal positions in camera frame and image plane
-    #     self.P_camera, self.P_image = self.camera_sensor.transform(self.P_base)
-
-    #     # Check if physically out of view
-    #     behind_camera = self.P_camera[:, 2] <= 0 # z <= 0
-    #     out_of_bounds = (self.P_image[:, 0] < 0) | (self.P_image[:, 0] > 1) | (self.P_image[:, 1] < 0) | (self.P_image[:, 1] > 1)
-    #     self.physically_out_of_view = behind_camera | out_of_bounds
-        
-    #     # Update timer
-    #     self.out_of_view_timer[self.physically_out_of_view] += self.dt
-    #     self.out_of_view_timer[~self.physically_out_of_view] = 0.0
-        
-    #     if self.enable_out_of_view_drift:
-    #         # Reset drift for those in view
-    #         self.out_of_view_drift[~self.physically_out_of_view] = 0.0
-            
-    #         # Add drift for those out of view
-    #         # drift step: N(0, scale)
-    #         drift_step = torch.randn_like(self.out_of_view_drift[self.physically_out_of_view]) * self.cfg.camera_sensor.drift_scale
-    #         self.out_of_view_drift[self.physically_out_of_view] += drift_step
-            
-    #         # Apply drift to P_image
-    #         self.P_image += self.out_of_view_drift
-            
-    #     # Determine if we should mask it (return -1)
-    #     threshold = self.cfg.camera_sensor.max_out_of_view_duration if self.enable_out_of_view_drift else 0.0
-    #     should_invalid_mask = behind_camera | (self.out_of_view_timer > threshold)
-                
-    #     # Apply mask
-    #     self.P_image[should_invalid_mask] = -1
-        
-    #     self.depth_in_view = torch.where(
-    #         should_invalid_mask,
-    #         torch.ones_like(self.P_camera[:, -1]) * -1,  # set to -1 if out of view
-    #         self.P_camera[:, -1].clip(min=0.1)
-    #     )
-    
     def _compute_device_pose_in_world(self):
         """ compute camera pose in world frame
         """
@@ -702,25 +681,33 @@ class LeggedRobotNav(LeggedRobot):
         """
         # Avoid resampling immediately after reset (e.g. first 100 steps)
         valid_time = self.episode_length_buf > self.cfg.commands.resample.min_steps
-        to_move =  (~self.object_moved) & valid_time
+        to_move = ((~self.object_moved) & valid_time)
         env_ids_resample = to_move.nonzero(as_tuple=False).flatten()
-        
+
+        # initial_time = self.episode_length_buf <= 20
+        # to_resample_invalid = ((~self.is_valid) & initial_time)
+        # env_ids_resample_invalid = to_resample_invalid.nonzero(as_tuple=False).flatten()
+        # self._resample_commands(env_ids_resample_invalid)
+
         if len(env_ids_resample) > 0:
             # Calculate success ratio
             success_ratio = self.is_success_state.float().mean().item()
             
             # Check config for active success feeding
-            use_success_feeding = False
-            if success_ratio < 0.1:
-                use_success_feeding = True
+            use_success_feeding = self.cfg.commands.resample.enable_success_feeding
+            # if success_ratio < 0.1:
+            #     use_success_feeding = True
         
             if use_success_feeding:
                 # Only feed a subset of environments to encourage exploration
                 # Probability of feeding: 30%
                 should_feed = torch.rand(len(env_ids_resample), device=self.device) < self.cfg.commands.resample.feeding_prob
+                # invalid env ids
+                # should_feed = should_feed | (~self.is_valid[env_ids_resample])
                 ids_to_feed = env_ids_resample[should_feed]
                 if len(ids_to_feed) > 0:
                     self._resample_object_pose_near_success(ids_to_feed)
+                
             else:
                 self._resample_commands(env_ids_resample)
                 self.env_start_pos[env_ids_resample] = self.root_states[env_ids_resample, :3].clone()
@@ -770,6 +757,11 @@ class LeggedRobotNav(LeggedRobot):
         # Update derived quantities
         self._compute_object_axis_end_points_in_world()
 
+        # Update the saved scenario state to the new resampled state
+        # So that if the agent fails, it replays from this near-success state (B/B')
+        # instead of the original start state (A).
+        self._save_scenario_state(env_ids)
+
     def _resample_near_success_place_object(self, env_ids, mask, robot_pos, path_dir, yaw):
         """ Helper for place object resampling (Large Box) """
         ids_place = env_ids[mask]
@@ -778,7 +770,7 @@ class LeggedRobotNav(LeggedRobot):
         # Radius estimate (max dim / 2)
         radius = torch.max(self.object_dims[ids_place], dim=1)[0].unsqueeze(-1) / 2.0
         
-        dist_fwd = torch_rand_float(self.dist_fwd_range[0], self.dist_fwd_range[1], (n_place, 1), device=self.device)
+        dist_fwd = torch_rand_float(-0.1, 0.2, (n_place, 1), device=self.device)
         dist_fwd = dist_fwd + radius
         dist_lat = torch_rand_float(self.dist_lat_range[0], self.dist_lat_range[1], (n_place, 1), device=self.device)
             
@@ -801,12 +793,12 @@ class LeggedRobotNav(LeggedRobot):
         
         # Reset Orientation: Align Global X with Path Dir (Upright)
         # Place boxes are forced horizontal, so we just align yaw.
-        yaw_place = yaw[mask]
-        sy = torch.sin(yaw_place * 0.5)
-        cy = torch.cos(yaw_place * 0.5)
-        q_yaw = torch.stack([torch.zeros_like(sy), torch.zeros_like(sy), sy, cy], dim=-1)
+        # yaw_place = yaw[mask]
+        # sy = torch.sin(yaw_place * 0.5)
+        # cy = torch.cos(yaw_place * 0.5)
+        # q_yaw = torch.stack([torch.zeros_like(sy), torch.zeros_like(sy), sy, cy], dim=-1)
         
-        self.object_quat[ids_place] = q_yaw
+        # self.object_quat[ids_place] = q_yaw
 
     def _resample_near_success_long_object(self, env_ids, mask, robot_pos, path_dir, yaw):
         """ Helper for long object resampling """
@@ -817,9 +809,9 @@ class LeggedRobotNav(LeggedRobot):
         # offset = self.cfg.env.grasp_offset_long
         
         # Randomize forward distance
-        dist_fwd = torch_rand_float(self.dist_fwd_range[0], self.dist_fwd_range[1], (n_long, 1), device=self.device)
+        dist_fwd = torch_rand_float(0.1, 0.5, (n_long, 1), device=self.device)
         # Randomize lateral offset
-        dist_lat = torch_rand_float(self.dist_lat_range[0], self.dist_lat_range[1], (n_long, 1), device=self.device)
+        dist_lat = torch_rand_float(-0.1, 0.1, (n_long, 1), device=self.device)
         
         # Object Length
         L = self.max_dim_vals[ids_long].unsqueeze(-1)
@@ -841,7 +833,9 @@ class LeggedRobotNav(LeggedRobot):
         
         # Orientation: Align Long Axis with Path Dir
         # 1. Base rotation: Align Global X with Path Dir
-        yaw_long = yaw[mask]
+        # Add random yaw perturbation
+        yaw_noise = torch_rand_float(-10.0, 10.0, (n_long, 1), device=self.device).squeeze(-1)
+        yaw_long = yaw[mask] + yaw_noise
         sy = torch.sin(yaw_long * 0.5)
         cy = torch.cos(yaw_long * 0.5)
         q_yaw = torch.stack([torch.zeros_like(sy), torch.zeros_like(sy), sy, cy], dim=-1)
@@ -884,7 +878,7 @@ class LeggedRobotNav(LeggedRobot):
         n_short = len(ids_short)
         
         # Sample dist_fwd (distance to goal)
-        dist_fwd = torch_rand_float(self.dist_fwd_range[0], self.dist_fwd_range[1], (n_short, 1), device=self.device)
+        dist_fwd = torch_rand_float(0.1, 0.4, (n_short, 1), device=self.device)
         # Sample dist_lat (lateral offset)
         dist_lat = torch_rand_float(self.dist_lat_range[0], self.dist_lat_range[1], (n_short, 1), device=self.device)
             
@@ -1025,7 +1019,7 @@ class LeggedRobotNav(LeggedRobot):
         # Gripper is usually higher.
         # So dz < 0 -> Pitch > 0 (Look down).
         vec_grip_to_target = opt_pos - self.gripper_world
-        d_xy = torch.norm(vec_grip_to_target[:, :2], dim=-1)
+        d_xy = torch.norm(vec_grip_to_target[:, :2], dim=1)
         d_z = vec_grip_to_target[:, 2]
         pitch_dynamic = torch.atan2(-d_z, d_xy)
         
@@ -1060,7 +1054,7 @@ class LeggedRobotNav(LeggedRobot):
         
         # Dynamic Pitch Calculation
         vec_grip_to_target = opt_pos - self.gripper_world
-        d_xy = torch.norm(vec_grip_to_target[:, :2], dim=-1)
+        d_xy = torch.norm(vec_grip_to_target[:, :2], dim=1)
         d_z = vec_grip_to_target[:, 2]
         pitch_dynamic = torch.atan2(-d_z, d_xy)
         
@@ -1092,18 +1086,19 @@ class LeggedRobotNav(LeggedRobot):
 
         # 2. Optimal Pose (on surface + clearance)
         dims_xy = self.object_dims[:, :2]
-        radius_xy = torch.max(dims_xy, dim=1)[0].unsqueeze(-1) / 2.0
-        opt_pos = self.object_pos - axis_inward * (radius_xy + self.cfg.env.grasp_offset_short)
+        radius_xy = torch.min(dims_xy, dim=1)[0].unsqueeze(-1) / 2.0
+        # opt_pos = self.object_pos - axis_inward * (radius_xy + self.cfg.env.grasp_offset_place)
+        opt_pos = self.object_pos - axis_inward * (radius_xy / 4.0)  # Move to edge
+        # opt_pos = self.object_pos.clone()
         opt_pos[:, 2] = self.object_pos[:, 2] + self.object_dims[:, 2] / 2.0 + clearance
         opt_dir = axis_inward
 
         # Dynamic Pitch Calculation
         vec_grip_to_target = opt_pos - self.gripper_world
-        d_xy = torch.norm(vec_grip_to_target[:, :2], dim=-1)
+        d_xy = torch.norm(vec_grip_to_target[:, :2], dim=1)
         d_z = vec_grip_to_target[:, 2]
         # pitch_dynamic = torch.atan2(-d_z, d_xy)
-        pitch_fixed = torch.ones_like(d_xy) * (-0.35)  # Fixed pitch of -30 degrees (look slightly down)
-
+        pitch_fixed = torch.ones_like(d_xy) * (self.cfg.commands.place_pitch_target)
         # 3. Hint Pose (same XY logic, but at surface+clearance)
         hint_pos = self.env_start_pos + axis_inward * hint_dist_from_start
         hint_pos[:, 2] = self.object_pos[:, 2] + self.object_dims[:, 2] / 2.0 + clearance
@@ -1155,6 +1150,7 @@ class LeggedRobotNav(LeggedRobot):
         self.d_goal_err_y = torch.abs(self.gripper_world[:, 1] - self.optimal_grasp_pos[:, 1])
         self.d_goal_err_z = torch.abs(self.gripper_world[:, 2] - self.optimal_grasp_pos[:, 2])
         self.pos_error_sq = w_x * torch.square(self.d_goal_err_x) + w_y * torch.square(self.d_goal_err_y) + w_z * torch.square(self.d_goal_err_z)
+        self.pos_error_sq_place = 2 * torch.square(self.d_goal_err_x) + 0.5 * torch.square(self.d_goal_err_y) + 0.1 * torch.square(self.d_goal_err_z)
         
         # Orientation Error
         roll_r, pitch_r, yaw_r = get_euler_xyz(self.base_quat)
@@ -1260,13 +1256,24 @@ class LeggedRobotNav(LeggedRobot):
         self.task_flags[env_ids] = is_place_local.float().unsqueeze(-1)
 
         # --- Shape Type Selection ---
-        # Default: Random mixed
-        type_indices = torch.randint(0, len(self.shape_types_list), (len(env_ids),), device=self.device)
+        # 1. Select non-box types for all environments initially to ensure Pick tasks don't get Box
+        other_indices = [i for i, name in enumerate(self.shape_types_list) if name != "box"]
+        if other_indices:
+            other_tensor = torch.tensor(other_indices, device=self.device)
+            type_indices = other_tensor[torch.randint(0, len(other_indices), (len(env_ids),), device=self.device)]
+        else:
+            type_indices = torch.randint(0, len(self.shape_types_list), (len(env_ids),), device=self.device)
         
-        # Override for Place Task: Must be Cuboid (Box)
-        if "cuboid" in self.shape_types_list:
-            cub_idx = self.shape_types_list.index("cuboid")
-            type_indices[is_place_local] = cub_idx
+        # 2. Override for Place Task: Must be Hollow Box (Well), never fallback to Cuboid
+        if "box" in self.shape_types_list:
+            box_idx = self.shape_types_list.index("box")
+            type_indices[is_place_local] = box_idx
+        else:
+            # If no hollow box available, place task is impossible
+            is_place_local[:] = False
+            self.is_place[env_ids] = False
+            self.is_pick[env_ids] = True
+            self.task_flags[env_ids] = 0.
             
         self.env_shape_type_indices[env_ids] = type_indices
         
@@ -1288,7 +1295,7 @@ class LeggedRobotNav(LeggedRobot):
                 r = torch_rand_float(target_cfg.shape.radius_range[0], target_cfg.shape.radius_range[1], (count, 1), device=self.device)
                 h = torch_rand_float(target_cfg.shape.height_range[0], target_cfg.shape.height_range[1], (count, 1), device=self.device)
                 params = torch.cat([r, h], dim=1)
-            elif type_name == "cuboid":
+            elif type_name == "cuboid" or type_name == "box":
                 # Sample Small (Pick)
                 x_s = torch_rand_float(target_cfg.shape.dims_range[0][0], target_cfg.shape.dims_range[0][1], (count, 1), device=self.device)
                 y_s = torch_rand_float(target_cfg.shape.dims_range[1][0], target_cfg.shape.dims_range[1][1], (count, 1), device=self.device)
@@ -1308,6 +1315,13 @@ class LeggedRobotNav(LeggedRobot):
             elif type_name == "sphere":
                 r = torch_rand_float(target_cfg.shape.radius_range[0], target_cfg.shape.radius_range[1], (count, 1), device=self.device)
                 params = r
+            elif type_name == "ellipsoid":
+                # Sample 3 dims from ellipsoid_dims_range
+                # range is [[min,max], [min,max], [min,max]] (diameters)
+                x = torch_rand_float(target_cfg.shape.ellipsoid_dims_range[0][0], target_cfg.shape.ellipsoid_dims_range[0][1], (count, 1), device=self.device)
+                y = torch_rand_float(target_cfg.shape.ellipsoid_dims_range[1][0], target_cfg.shape.ellipsoid_dims_range[1][1], (count, 1), device=self.device)
+                z = torch_rand_float(target_cfg.shape.ellipsoid_dims_range[2][0], target_cfg.shape.ellipsoid_dims_range[2][1], (count, 1), device=self.device)
+                params = torch.cat([x, y, z], dim=1)
             
             # Compute dims
             dims = PCATargetTracker.compute_object_dims(type_name, params, self.device)
@@ -1346,7 +1360,21 @@ class LeggedRobotNav(LeggedRobot):
             is_sphere = (self.env_shape_type_indices[env_ids] == sphere_idx)
             
         # Too Long = Horizontal AND Large AND Not Sphere
-        self.obj_is_too_long[env_ids] = is_horizontal & is_large & (~is_sphere)
+        # Keep Ellipsoid as "long" if it's large and horizontal? Or user wants it as "short"?
+        # User said "sphere is too symmetrical, need ellipsoid as short logic task".
+        # So Ellipsoid should be treated likely as "Not Too Long" or similar to Sphere logic if it's small.
+        # But if it's elongated, it might be "long".
+        # However, the user explicitly asked for ellipsoid to replace sphere for short logic.
+        # So we should exclude ellipsoid from "obj_is_too_long" logic OR ensure its dimensions are small?
+        # If we treat it as sphere, we just add it to the exclusion.
+        
+        # Check if Ellipsoid
+        is_ellipsoid = torch.zeros_like(is_horizontal, dtype=torch.bool)
+        if "ellipsoid" in self.shape_types_list:
+            ellipsoid_idx = self.shape_types_list.index("ellipsoid")
+            is_ellipsoid = (self.env_shape_type_indices[env_ids] == ellipsoid_idx)
+            
+        self.obj_is_too_long[env_ids] = is_horizontal & is_large & (~is_sphere) & (~is_ellipsoid)
         
         # Compute Z Offset
         z_off = torch.zeros_like(self.object_dims[env_ids, 2])
@@ -1379,11 +1407,50 @@ class LeggedRobotNav(LeggedRobot):
             if mask_h.any():
                 z_off[mask_h] = self.object_dims[env_ids][mask_h, 2] / 2.0
             
+        if "box" in self.shape_types_list:
+            box_idx = self.shape_types_list.index("box")
+            is_box = (self.env_shape_type_indices[env_ids] == box_idx)
+            
+            # Vertical: y/2 (dims[1]/2)
+            # Horizontal: z/2 (dims[2]/2)
+            mask_v = is_box & self.obj_is_vertical[env_ids]
+            mask_h = is_box & (~self.obj_is_vertical[env_ids])
+            
+            if mask_v.any():
+                z_off[mask_v] = self.object_dims[env_ids][mask_v, 1] / 2.0
+            if mask_h.any():
+                z_off[mask_h] = self.object_dims[env_ids][mask_h, 2] / 2.0
+            
+            self.object_z_offset[env_ids] = z_off
+            mask_h = is_box & (~self.obj_is_vertical[env_ids])
+            
+            if mask_v.any():
+                z_off[mask_v] = self.object_dims[env_ids][mask_v, 1] / 2.0
+            if mask_h.any():
+                z_off[mask_h] = self.object_dims[env_ids][mask_h, 2] / 2.0
+            
         if "sphere" in self.shape_types_list:
             sph_idx = self.shape_types_list.index("sphere")
             is_sph = (self.env_shape_type_indices[env_ids] == sph_idx)
             if is_sph.any():
                 z_off[is_sph] = self.object_dims[env_ids][is_sph, 2] / 2.0
+                
+        if "ellipsoid" in self.shape_types_list:
+            ellipsoid_idx = self.shape_types_list.index("ellipsoid")
+            is_ellipsoid = (self.env_shape_type_indices[env_ids] == ellipsoid_idx)
+            # Ellipsoid center is at [0,0,0] originally. 
+            # We want it to rest on ground?
+            # If so, Z-offset should be rz (dims[2]/2).
+            # Whether vertical or horizontal, we just use the current Z-dimension / 2.
+            # Unlike cylinder/cuboid which swap dims based on orientation,
+            # Ellipsoid dimensions are set in params. 
+            # If we don't rotate it explicitly by swapping dims, dims[2] is always the Z radius * 2.
+            # But wait, we might rotate it later.
+            # The current logic sets z_offset based on current active Z-dim.
+            # For ellipsoid, the dims are sampled as (x,y,z).
+            # If we assume it spawns axis-aligned, then z_off is dims[2]/2.
+            if is_ellipsoid.any():
+                z_off[is_ellipsoid] = self.object_dims[env_ids][is_ellipsoid, 2] / 2.0
             
         self.object_z_offset[env_ids] = z_off
 
@@ -1615,23 +1682,34 @@ class LeggedRobotNav(LeggedRobot):
                 'rot_2d': noise_scales.nav_rot_2d,
             }
 
+        # Prepare pre-PCA noise if enabled
+        pre_pca_noise_params = None
+        if self.cfg.target.perception.add_pre_pca_noise:
+            pre_pca_noise_params = self.cfg.target.perception.pre_pca_noise
+
         # 1. Run Perception Tracker to get 3D Sigma Points in World Frame
         # sigma_points_2d: [N, 5, 2] in Image Plane (normalized uv)
         # sigma_points_3d: [N, 7, 3] in World Frame (if 3D)
         # is_valid: [N]
-        sigma_points_2d, _, _, _, _, _, sigma_points_3d, is_valid = self.tracker.compute_features(
+        sigma_points_2d, _, _, _, weights, _, sigma_points_3d, is_valid = self.tracker.compute_features(
             object_pos=self.object_pos, # shape: [N, 3]
             object_quat=self.object_quat, # shape: [N, 4]
             camera_params=self.camera_params_dict, # camera intrinsics
             camera_transform=self.camera_transform_world, # camera extrinsic pose in world frame
             use_geometric_weight=self.use_geometric_weight,
             noise_params=noise_params,
+            pre_pca_noise_params=pre_pca_noise_params,
+            noise_active_mask=self.is_place,
             debug_timer=self.debug_timer,
-            debug_info=self.debug_info
+            debug_info=self.debug_info,
+            alpha=self.sigma_points_alpha
         )
+        self.vis_weights[:] = weights
 
         valid_mask = is_valid.view(self.num_envs, 1, 1)
-        dummy_sigma_points_3d = self.object_pos.view(self.num_envs, 1, 3).expand_as(sigma_points_3d)
+        # Use object center + persistent per-episode offset when perception is invalid
+        dummy_pos = self.object_pos + self.dummy_sigma_points_offset
+        dummy_sigma_points_3d = dummy_pos.view(self.num_envs, 1, 3).expand_as(sigma_points_3d)
         sigma_points_3d = torch.where(valid_mask, sigma_points_3d, dummy_sigma_points_3d)
 
         # Simulate frame drops
@@ -1644,16 +1722,18 @@ class LeggedRobotNav(LeggedRobot):
             self._compute_sigma_points_base(sigma_points_3d, base_pos, base_quat)
             self._compute_sigma_points_camera()
             if self.cfg.env.sigma_frame == "base":
-                sigma_points_obs_unmasked = self.sigma_points_base # [N, 7, 3]
+                sigma_points_obs_unmasked = self.sigma_points_base.clone() # [N, 7, 3]
             elif self.cfg.env.sigma_frame == "camera":
-                sigma_points_obs_unmasked = self.sigma_points_camera # [N, 7, 3]
+                sigma_points_obs_unmasked = self.sigma_points_camera.clone() # [N, 7, 3]
             else:
                 raise ValueError(f"Unsupported sigma_frame: {self.cfg.env.sigma_frame}")
             invalid_sigma = torch.ones_like(sigma_points_obs_unmasked) * -1.0
 
-            # [Note] Noise is now structured and added inside tracker.py
+            if self.cfg.commands.enable_place_offset:
+                # Apply place offset to z coordinate of sigma points when placing
+                sigma_points_obs_unmasked[self.is_place, :, 2:3] += self.place_offset[self.is_place].unsqueeze(-1) # farther away in z when placing
 
-            # if invalide, sigma_points_3d = self.object_pos * self.num_sigma_points_3d
+            # [Note] Noise is now structured and added inside tracker.py
             
             if self.cfg.commands.enable_invalid_cmds:
                 if self.cfg.commands.enable_out_of_view_drift:
@@ -1663,10 +1743,13 @@ class LeggedRobotNav(LeggedRobot):
                         # drift step: N(0, scale)
                         drift_step = torch.randn_like(self.out_of_view_drift[~is_valid]) * self.cfg.commands.drift_scale
                         self.out_of_view_drift[~is_valid] += drift_step
-                        
+                        self.out_of_view_drift = torch.clamp(self.out_of_view_drift, 
+                                                            min=-self.cfg.commands.max_drift, 
+                                                            max=self.cfg.commands.max_drift)
                         # Apply drift to sigma points
                         sigma_points_obs_unmasked += self.out_of_view_drift
                         self.sigma_points_obs = sigma_points_obs_unmasked
+
                 else:
                     self.sigma_points_obs = torch.where(valid_mask, sigma_points_obs_unmasked, invalid_sigma) # [N, 7, 3]
             else:
@@ -1758,7 +1841,8 @@ class LeggedRobotNav(LeggedRobot):
                 object_pos=self.object_pos[0],
                 object_quat=self.object_quat[0],
                 num_vis_points=self.cfg.camera_sensor.num_vis_points,
-                env_idx=0
+                env_idx=0,
+                weights=self.vis_weights[0]
             )
 
             # Draw Sigma points in 3D
@@ -1859,15 +1943,6 @@ class LeggedRobotNav(LeggedRobot):
         start = 0
         end = 0
 
-        # obs_now = torch.cat([
-        #     self.base_lin_vel_pred * self.obs_scales.lin_vel, # 3
-        #     self.base_ang_vel * self.obs_scales.ang_vel, # 3
-        #     self.projected_gravity, # 3
-        #     self.nav_commands, # 15/21/9 (Ground Truth Vision)
-        #     self.task_flags, # 1
-        #     self.orig_nav_actions, # 4
-        #     ], dim=-1)
-        
         start = end
         end = start + 3 # base_lin_vel_pred
         noise_vec[start:end] = 0. # usually no direct noise for estimated velocity
@@ -1888,17 +1963,10 @@ class LeggedRobotNav(LeggedRobot):
         end = start + self.task_flags.shape[1]
         noise_vec[start:end] = 0. # task_flags
 
-        # start = end
-        # end = start + self.dof_pos.shape[1]
-        # noise_vec[start:end] =  noise_scales.dof_pos * noise_level * self.obs_scales.dof_pos
-
-        # start = end
-        # end = start + self.dof_vel.shape[1]
-        # noise_vec[start:end] = noise_scales.dof_vel * noise_level * self.obs_scales.dof_vel
-        
         start = end
         end = start + self.nav_actions.shape[1]
         noise_vec[start:end] = 0. # self.nav_actions (get from rl policy, no noise)
+
         return noise_vec
 
     def _resample_delay_nav_commands(self):
@@ -1932,6 +2000,12 @@ class LeggedRobotNav(LeggedRobot):
         # 1. Update ground-truth vision features (already done in post_physics_callback)
         # self.nav_commands contains the current "perfect" perception
         
+        # [Contrastive Learning] Update Task ID
+        # 0: Pick Long, 1: Pick Short, 2: Place
+        self.task_id[:] = 0.0
+        self.task_id[self.is_pick & (~self.obj_is_too_long)] = 1.0
+        self.task_id[self.is_place] = 2.0
+
         # 2. Get the "Ground Truth" observation for the CURRENT step
         obs_now = torch.cat([
             self.base_lin_vel_pred * self.obs_scales.lin_vel, # 3
@@ -1939,9 +2013,6 @@ class LeggedRobotNav(LeggedRobot):
             self.projected_gravity, # 3
             self.nav_commands, # 15/21/9 (Ground Truth Vision)
             self.task_flags, # 1
-            # self.orig_nav_actions, # 4
-            # self.reindex((self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos),
-            # self.reindex(self.dof_vel * self.obs_scales.dof_vel),
             self.nav_actions, # 4
             ], dim=-1)
 
@@ -1972,8 +2043,8 @@ class LeggedRobotNav(LeggedRobot):
                 self.current_perceived_obs.unsqueeze(1)
             ], dim=1)
         
-        # 8. Final assembly for self.obs_buf
-        self.obs_buf = self.obs_hist_buffer.view(self.num_envs, -1)
+        # 8. priv + obs
+        self.obs_buf = torch.cat([self.task_id, self.obs_hist_buffer.view(self.num_envs, -1)], dim=-1)
 
     # ------------- Cameras -------------
     def attach_camera(self, env_handle, actor_handle):
@@ -2185,7 +2256,7 @@ class LeggedRobotNav(LeggedRobot):
         all_allow_visible = not self.cfg.commands.enable_invalid_cmds
         if all_allow_visible:
             return torch.zeros_like(self.is_valid).float()
-        return (~self.is_valid).float() * (~self.is_success_state).float() * (~self.force_look_triggered).float()
+        return (~self.is_valid).float() * (~self.is_success_state).float() * (~self.force_look_triggered).float() * (self.obj_is_too_long).float()
 
     def _reward_optimal_pos_tracking(self):
         """
@@ -2240,15 +2311,21 @@ class LeggedRobotNav(LeggedRobot):
         Reward for being in the success state (reaching object center with correct alignment).
         Given continuously while the robot maintains the state.
         """
-        r_rot = torch.exp(-self.rot_error_sq_near / 0.02) # sigma ~ 0.14 rad
-        r_pos = torch.exp(-self.pos_error_sq / 0.02) # sigma ~ 0.14 m
+        r_rot = torch.exp(-self.rot_error_sq_near / self.cfg.rewards.rot_track_sigma) # sigma ~ 0.14 rad
+        r_pos_short_pick = torch.exp(-self.pos_error_sq / self.cfg.rewards.soft_sigma) # sigma ~ 0.14 m
+        r_pos_long_pick = torch.exp(-self.pos_error_sq / self.cfg.rewards.pos_track_sigma) # sigma ~ 0.14 m
+        r_pos_place = torch.exp(-self.pos_error_sq_place / self.cfg.rewards.soft_sigma) # sigma ~ 0.14 m
 
         lin_vel_sq = torch.sum(torch.square(self.base_lin_vel), dim=1)
         ang_vel_sq = torch.sum(torch.square(self.base_ang_vel), dim=1)
-        r_vel = torch.exp(-(lin_vel_sq + ang_vel_sq) / 0.04) # sigma ~ 0.2 m/s
+        r_vel = torch.exp(-(lin_vel_sq + ang_vel_sq) / self.cfg.rewards.soft_sigma) # sigma ~ 0.2 m/s
 
-        _rew_pick = self.is_pick * r_rot * (1 + self.cfg.rewards.weight_track_pos * r_pos)
-        _rew_place = self.is_place * r_rot * (1 + self.cfg.rewards.weight_track_pos * r_pos)
+        # _rew_pick = self.is_pick * r_rot * (1 + self.cfg.rewards.weight_track_pick_pos * r_pos_pick)
+
+        _rew_short_pick = self.is_pick * (~self.obj_is_too_long) * r_rot * (1.0 + 5.0 * r_pos_short_pick)
+        _rew_long_pick = self.is_pick * (self.obj_is_too_long) * r_rot * (2.5 + self.cfg.rewards.weight_track_pick_pos * r_pos_long_pick)
+        _rew_pick = _rew_short_pick + _rew_long_pick
+        _rew_place = self.is_place * r_rot * (0.5 + self.cfg.rewards.weight_track_place_pos * r_pos_place)
 
         return self.is_success_state.float() * (_rew_pick + _rew_place) * r_vel
 
@@ -2257,8 +2334,8 @@ class LeggedRobotNav(LeggedRobot):
         """
         too_close = self.distance < 0.5
         backing_up = self.base_lin_vel[:, 0] < -0.1
-        # return too_close.float() * backing_up.float()
-        return too_close.float() * backing_up.float()
+        long_obj_pick = self.is_pick & self.obj_is_too_long # only disable when picking long objects
+        return too_close.float() * backing_up.float() * (~long_obj_pick).float()
     
     def _reward_sequential_reaching(self):
         """ Reward for reaching Hint Pose first, then Optimal Pose.
@@ -2297,14 +2374,18 @@ class LeggedRobotNav(LeggedRobot):
         
         # 2. Orientation Reward
         # Strict alignment (0.1 rad ~ 5.7 deg)
-        r_rot = (~self.near_target).float() * torch.exp(-self.rot_error_sq_far / 0.02) + \
-                1 * (self.near_target).float() * torch.exp(-self.rot_error_sq_near / 0.02)  # sigma ~ 0.14 rad
+        r_rot = (~self.near_target).float() * torch.exp(-self.rot_error_sq_far / self.cfg.rewards.rot_track_sigma) + \
+                1 * (self.near_target).float() * torch.exp(-self.rot_error_sq_near / self.cfg.rewards.rot_track_sigma)  # sigma ~ 0.14 rad
         
-        # 3. Goal Reaching Reward (Pulls along line to Optimal)
-        r_pos = torch.exp(-self.pos_error_sq / 0.02) # sigma ~ 0.14 m
+        r_pos_short_pick = torch.exp(-self.pos_error_sq / self.cfg.rewards.soft_sigma) # sigma ~ 0.14 m
+        r_pos_long_pick = torch.exp(-self.pos_error_sq / self.cfg.rewards.pos_track_sigma) # sigma ~ 0.14 m
+        r_pos_place = torch.exp(-self.pos_error_sq_place / self.cfg.rewards.soft_sigma) # sigma ~ 0.14 m
 
-        _rew_pick = self.is_pick * r_path * r_rot * (1 + self.cfg.rewards.weight_track_pos * r_pos)
-        _rew_place = self.is_place * r_path * r_rot * (1 + self.cfg.rewards.weight_track_pos * r_pos)
+        # 3. Goal Reaching Reward (Pulls along line to Optimal)
+        _rew_short_pick = self.is_pick * (~self.obj_is_too_long) * r_path * r_rot * (1.0 + 5.0 * r_pos_short_pick)
+        _rew_long_pick = self.is_pick * (self.obj_is_too_long) * r_path * r_rot * (2.5 + self.cfg.rewards.weight_track_pick_pos * r_pos_long_pick)
+        _rew_pick = _rew_short_pick + _rew_long_pick
+        _rew_place = self.is_place * r_path * r_rot * (0.5 + self.cfg.rewards.weight_track_place_pos * r_pos_place)
 
         return _rew_pick + _rew_place
 
@@ -2312,9 +2393,9 @@ class LeggedRobotNav(LeggedRobot):
         """ Reward for having a proper pitch angle when placing
         """
         pitch_err_sq = torch.square(self.pitch_err)
-        r_rot = torch.exp(-pitch_err_sq / 0.04) # sigma ~ 0.14 rad
+        r_pitch = torch.exp(-pitch_err_sq / self.cfg.rewards.soft_sigma) # sigma ~ 0.14 rad
         lookup = self.euler_rpy[:, 1] < 0.0
         lookup_mag = torch.abs(self.euler_rpy[:, 1]) * (lookup.float())
-
-        return self.is_place * ( 2 * self.near_target.float() * r_rot - \
-                                 1 * self.far_target.float() * lookup_mag )
+        should_pitch = torch.logical_and(self.d_goal_err_x < 0.10, self.d_goal_err_y < 0.05)
+        return self.is_place * ( 2 * (should_pitch) * r_pitch - \
+                                 2 * self.far_target.float() * lookup_mag )

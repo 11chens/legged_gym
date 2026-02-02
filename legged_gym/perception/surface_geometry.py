@@ -114,6 +114,124 @@ class Cuboid(SurfaceShape):
             
         return points, normals
 
+class Box(SurfaceShape):
+    """ Hollow Box (Well) with 10 surfaces. Uses structured grid sampling to ensure full occlusion coverage at distance. """
+    def sample_surface(self, num_points, num_envs, params):
+        sx = params[:, 0]
+        sy = params[:, 1]
+        sz = params[:, 2]
+        
+        # We have 10 surfaces. Allocate points roughly equally.
+        pts_per_surf = num_points // 10
+        if pts_per_surf < 1: pts_per_surf = 1
+        
+        # We use a grid for each surface: sqrt(pts_per_surf) x sqrt(pts_per_surf)
+        grid_size = int(np.sqrt(pts_per_surf))
+        if grid_size < 1: grid_size = 1
+        actual_pts_per_surf = grid_size * grid_size
+        
+        # Generate grid [-0.5, 0.5]
+        lin_range = torch.linspace(-0.5, 0.5, grid_size, device=self.device)
+        u_grid, v_grid = torch.meshgrid(lin_range, lin_range, indexing='ij')
+        u_grid = u_grid.flatten() # [G*G]
+        v_grid = v_grid.flatten()
+        
+        # Total points we will generate
+        total_gen = actual_pts_per_surf * 10
+        points = torch.zeros((num_envs, total_gen, 3), device=self.device)
+        normals = torch.zeros((num_envs, total_gen, 3), device=self.device)
+        
+        # Helper to fill faces
+        def fill_face(start_idx, p_base, n_base, sx_v, sy_v, sz_v, axes):
+            # axes: e.g. [0, 1, 2] means point = [const, u, v]
+            # p_base: [N, 1] constant value for the first axis
+            # n_base: [N, 3] normal
+            end_idx = start_idx + actual_pts_per_surf
+            
+            p_batch = torch.zeros((num_envs, actual_pts_per_surf, 3), device=self.device)
+            # Add a tiny random jitter to the grid to avoid perfect alignment artifacts
+            jitter = (torch.rand((num_envs, actual_pts_per_surf), device=self.device) - 0.5) / grid_size
+            u_jittered = u_grid.unsqueeze(0) + jitter
+            jitter2 = (torch.rand((num_envs, actual_pts_per_surf), device=self.device) - 0.5) / grid_size
+            v_jittered = v_grid.unsqueeze(0) + jitter2
+            
+            p_batch[..., axes[0]] = p_base.unsqueeze(1)
+            p_batch[..., axes[1]] = u_jittered * sx_v.unsqueeze(1)
+            p_batch[..., axes[2]] = v_jittered * sy_v.unsqueeze(1)
+            
+            points[:, start_idx:end_idx, :] = p_batch
+            normals[:, start_idx:end_idx, :] = n_base.unsqueeze(1)
+            return end_idx
+
+        # sx, sy, sz are [N, 1]
+        # Front Out/In
+        curr = fill_face(0, sx/2, torch.stack([torch.ones_like(sx), torch.zeros_like(sx), torch.zeros_like(sx)], dim=-1), sy, sz, None, [0, 1, 2])
+        curr = fill_face(curr, sx/2, torch.stack([-torch.ones_like(sx), torch.zeros_like(sx), torch.zeros_like(sx)], dim=-1), sy, sz, None, [0, 1, 2])
+        # Back Out/In
+        curr = fill_face(curr, -sx/2, torch.stack([-torch.ones_like(sx), torch.zeros_like(sx), torch.zeros_like(sx)], dim=-1), sy, sz, None, [0, 1, 2])
+        curr = fill_face(curr, -sx/2, torch.stack([torch.ones_like(sx), torch.zeros_like(sx), torch.zeros_like(sx)], dim=-1), sy, sz, None, [0, 1, 2])
+        # Left Out/In
+        curr = fill_face(curr, sy/2, torch.stack([torch.zeros_like(sy), torch.ones_like(sy), torch.zeros_like(sy)], dim=-1), sx, sz, None, [1, 0, 2])
+        curr = fill_face(curr, sy/2, torch.stack([torch.zeros_like(sy), -torch.ones_like(sy), torch.zeros_like(sy)], dim=-1), sx, sz, None, [1, 0, 2])
+        # Right Out/In
+        curr = fill_face(curr, -sy/2, torch.stack([torch.zeros_like(sy), -torch.ones_like(sy), torch.zeros_like(sy)], dim=-1), sx, sz, None, [1, 0, 2])
+        curr = fill_face(curr, -sy/2, torch.stack([torch.zeros_like(sy), torch.ones_like(sy), torch.zeros_like(sy)], dim=-1), sx, sz, None, [1, 0, 2])
+        # Bot Out/In
+        curr = fill_face(curr, -sz/2, torch.stack([torch.zeros_like(sz), torch.zeros_like(sz), -torch.ones_like(sz)], dim=-1), sx, sy, None, [2, 0, 1])
+        curr = fill_face(curr, -sz/2, torch.stack([torch.zeros_like(sz), torch.zeros_like(sz), torch.ones_like(sz)], dim=-1), sx, sy, None, [2, 0, 1])
+
+        # If we didn't generate exactly num_points, pad or clip
+        if total_gen < num_points:
+            padding = num_points - total_gen
+            points = torch.cat([points, points[:, :padding, :]], dim=1)
+            normals = torch.cat([normals, normals[:, :padding, :]], dim=1)
+        else:
+            points = points[:, :num_points, :]
+            normals = normals[:, :num_points, :]
+
+        return points, normals
+
+class Ellipsoid(SurfaceShape):
+    def sample_surface(self, num_points, num_envs, params):
+        # params: [radius_x, radius_y, radius_z] (semi-axes)
+        # Note: input params might be diameters (dims), so we divide by 2 if they are interpreted as such.
+        # In legged_robot_nav, we see for cuboid/box it uses x, y, z which are full lengths.
+        # For sphere, it uses radius directly.
+        # Let's assume input params are full diameters (x, y, z) to be consistent with cuboids/box logic, 
+        # or semi-axes?
+        # Looking at legged_robot_nav for cuboid: dims are size_x, size_y, size_z.
+        # So it's best to interpret params as diameters (full extent).
+        
+        rx = params[:, 0].view(-1, 1, 1) / 2.0
+        ry = params[:, 1].view(-1, 1, 1) / 2.0
+        rz = params[:, 2].view(-1, 1, 1) / 2.0
+        
+        # Sample points on unit sphere
+        # Use simple rejection sampling or normalizing Gaussian
+        normal_pre = torch.randn((num_envs, num_points, 3), device=self.device)
+        unit_sphere = normal_pre / torch.norm(normal_pre, dim=-1, keepdim=True)
+        
+        # Scale by semi-axes to get points on ellipsoid
+        # P = (rx*x, ry*y, rz*z)
+        x = unit_sphere[:, :, 0:1]
+        y = unit_sphere[:, :, 1:2]
+        z = unit_sphere[:, :, 2:3]
+        
+        points = torch.cat([x * rx, y * ry, z * rz], dim=-1)
+        
+        # Compute normals
+        # For ellipsoid (x/a)^2 + ... = 1, gradient is (2x/a^2, 2y/b^2, 2z/c^2)
+        # Normal is proportional to (x/a^2, y/b^2, z/c^2)
+        # Here x, y, z are the coordinates on ellipsoid.
+        nx = points[:, :, 0:1] / (rx**2)
+        ny = points[:, :, 1:2] / (ry**2)
+        nz = points[:, :, 2:3] / (rz**2)
+        
+        normal_unnormalized = torch.cat([nx, ny, nz], dim=-1)
+        normals = normal_unnormalized / torch.norm(normal_unnormalized, dim=-1, keepdim=True)
+        
+        return points, normals
+
 class Cylinder(SurfaceShape):
     def sample_surface(self, num_points, num_envs, params):
         # params: [radius, height]

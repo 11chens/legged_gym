@@ -1,46 +1,60 @@
 import torch
 
+def compute_occlusion_mask(points_2d, depths, valid_mask, grid_res=64):
+    """
+    Compute visibility mask based on a coarse Z-buffer.
+    """
+    N, M, _ = points_2d.shape
+    device = points_2d.device
+    
+    occ_mask = torch.ones((N, M), device=device)
+    if not valid_mask.any():
+        return occ_mask.unsqueeze(-1)
+
+    # 1. Map normalized [0, 1] to grid coordinates
+    grid_x = torch.clamp((points_2d[..., 0] * grid_res).long(), 0, grid_res - 1)
+    grid_y = torch.clamp((points_2d[..., 1] * grid_res).long(), 0, grid_res - 1)
+    grid_idx = grid_y * grid_res + grid_x 
+    
+    # 2. Build Z-buffer using ALL points
+    min_depths = torch.full((N, grid_res * grid_res), 1e6, device=device)
+    depths_masked = torch.where(valid_mask, depths, torch.full_like(depths, 1e6))
+    min_depths = torch.scatter_reduce(min_depths, 1, grid_idx, depths_masked, reduce='min', include_self=True)
+    
+    # 3. Compare point depth with the min depth in its cell
+    # No pooling: relying on structured sampling to fill cells.
+    grid_min_depths = torch.gather(min_depths, 1, grid_idx)
+    
+    # [建模준수] Use a STRICT absolute depth threshold.
+    # 0.02m (2cm) is a safe margin for projection discretization.
+    occ_mask = (depths <= grid_min_depths + 0.02).float()
+    
+    return occ_mask.unsqueeze(-1)
+
+
 def compute_visibility_weights(points, normals, camera_pos, use_geometric_weight=True):
     """
-    Compute visibility weights based on back-face culling and geometric projection.
-    
-    Args:
-        points (Tensor): [num_envs, num_points, 3] Points in World Frame.
-        normals (Tensor): [num_envs, num_points, 3] Normals in World Frame.
-        camera_pos (Tensor): [num_envs, 3] Camera position in World Frame.
-        use_geometric_weight (bool): If True, apply Jacobian weighting (n.v / dist^2) to simulate 2D area integral.
-        
-    Returns:
-        weights (Tensor): [num_envs, num_points, 1] Weights.
+    Compute visibility weights based on back-face culling.
     """
-    # Vector from point to camera
-    # camera_pos: [N, 3] -> [N, 1, 3]
     view_vec = camera_pos.unsqueeze(1) - points # [N, M, 3]
-    
-    # Distance squared
     dist_sq = (view_vec ** 2).sum(dim=-1) # [N, M]
     dist = torch.sqrt(dist_sq)
-    
-    # Normalize view vector
     view_dir = view_vec / (dist.unsqueeze(-1) + 1e-6)
     
     # Dot product: V . N
-    # If > 0, the face is pointing towards the camera (visible)
     dot_prod = (view_dir * normals).sum(dim=-1) # [N, M]
     
-    # Base visibility (Back-face culling)
+    # Strict Back-face culling
     visible_mask = (dot_prod > 0).float()
     
     if use_geometric_weight:
-        # Geometric Weight: (n . v) / dist^2
-        # This compensates for the density difference between 3D surface sampling and 2D projection area.
-        # w_i proportional to Projected Area of the surface element.
-        geo_weight = visible_mask * dot_prod / (dist_sq + 1e-6)
-        weights = geo_weight.unsqueeze(-1)
+        # Shading: restores the variation in the Scan Map
+        weights = visible_mask * dot_prod / (dist_sq + 1e-6)
     else:
-        weights = visible_mask.unsqueeze(-1)
-    
-    return weights
+        weights = visible_mask
+        
+    return weights.unsqueeze(-1)
+
 
 def project_points(points_world, camera_params, camera_transform):
     """
@@ -179,6 +193,20 @@ def generate_sigma_points(mean, eigvals, eigvecs, alpha=2.0):
     for i in range(dim):
         idx = dim - 1 - i
         v = eigvecs[:, :, idx] # [N, dim]
+
+        # [Canonicalize Sign]
+        # Ensure the component with largest absolute value is positive.
+        # This aligns the direction of v to avoid random flipping between Torch/Numpy or frames.
+        # 1. Find the index of the largest absolute component for each vector in the batch
+        max_abs_val, max_indices = torch.max(torch.abs(v), dim=1) # [N], [N]
+        # 2. Gather the actual values at these indices to check their sign
+        # gather expects index to have same dims, so unsqueeze
+        max_vals = torch.gather(v, 1, max_indices.unsqueeze(1)).squeeze(1) # [N]
+        # 3. Create flip mask: -1 where val < 0, +1 otherwise
+        multipliers = torch.where(max_vals < 0, -torch.ones_like(max_vals), torch.ones_like(max_vals))
+        # 4. Apply flip
+        v = v * multipliers.unsqueeze(1)
+        
         l = torch.sqrt(eigvals[:, idx:idx+1]) # [N, 1]
         
         p_plus = mean + alpha * l * v

@@ -308,32 +308,47 @@ class VisualizationUtils:
                                      p_closest[0], p_closest[1], p_closest[2]], dtype=np.float32),
                            np.array([1, 0, 0], dtype=np.float32))
 
-    def draw_target_points(self, local_points, object_pos, object_quat, num_vis_points, env_idx=0):
+    def draw_target_points(self, local_points, object_pos, object_quat, num_vis_points, env_idx=0, weights=None):
         """
         Downsample and draw target points in world frame.
         local_points: [N, 3] Tensor (all points)
         object_pos: [3] Tensor
         object_quat: [4] Tensor
         num_vis_points: int
+        weights: [N, 1] visibility weights
         """
         if not self.viewer:
             return
             
-        num_points = local_points.shape[0]
-        stride_size = int(num_points // num_vis_points)
-        if stride_size < 1:
-            stride_size = 1
-            
-        points_local_sample = local_points[::stride_size]
-        
-        # Transform to world frame
-        points_world_sample = quat_apply(
-            object_quat.unsqueeze(0).expand(points_local_sample.shape[0], -1), 
-            points_local_sample
+        # 1. Draw "Ghost" Body (All points in Blue)
+        num_all = local_points.shape[0]
+        stride_all = max(1, int(num_all // num_vis_points))
+        pts_all_local = local_points[::stride_all]
+        pts_all_world = quat_apply(
+            object_quat.unsqueeze(0).expand(pts_all_local.shape[0], -1), 
+            pts_all_local
         ) + object_pos
+        self.draw_3d_lines(pts_all_world, color=[0, 0, 0.8], env_idx=env_idx) # Blue Ghost
+
+        # 2. Draw "Visible" Points (Filtered in Green)
+        if weights is not None:
+            mask = weights.squeeze() > 1e-6
+            local_points_vis = local_points[mask]
+        else:
+            local_points_vis = local_points
+
+        num_vis = local_points_vis.shape[0]
+        if num_vis > 0:
+            stride_vis = max(1, int(num_vis // num_vis_points))
+            pts_vis_local = local_points_vis[::stride_vis]
+            pts_vis_world = quat_apply(
+                object_quat.unsqueeze(0).expand(pts_vis_local.shape[0], -1), 
+                pts_vis_local
+            ) + object_pos
+            self.draw_3d_lines(pts_vis_world, color=[0, 1, 0], env_idx=env_idx) # Bright Green
+            return pts_vis_world
         
-        self.draw_3d_lines(points_world_sample, color=[0, 0, 1], env_idx=env_idx)
-        return points_world_sample
+        return None
 
     def draw_head_tail_points(self, head_pos, tail_pos, env_idx=0):
         """

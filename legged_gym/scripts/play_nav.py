@@ -70,8 +70,8 @@ def play(args):
     env: LeggedRobotNav
     env_cfg: Go2NavFlatCfg
 
-    # args.load_run = '01_12_17-33-24_'
-    # args.checkpoint = 3400
+    args.load_run = '02_01_22-25-47_'
+    # args.checkpoint = 2400
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     # override some parameters for testing
     env_cfg.env.num_envs = 1
@@ -81,13 +81,14 @@ def play(args):
     env_cfg.terrain.num_rows = 1
     env_cfg.terrain.num_cols = 1
     env_cfg.terrain.curriculum = False
-    env_cfg.noise.add_noise = False
+    env_cfg.noise.add_noise = True
 
     env_cfg.camera_sensor.fix_extrinsics = True
     env_cfg.camera_sensor.fix_intrinsics = True
     env_cfg.camera_sensor.fix_img_shape = True
     env_cfg.camera_sensor.enable_camera = True
-    env_cfg.commands.resample.replay_failed_prob = 0.0
+    env_cfg.camera_sensor.num_vis_points = 200
+    env_cfg.commands.resample.replay_failed_prob = 0.7
     env_cfg.commands.enable_delay = False
 
     env_cfg.commands.frame_drop_prob = 0.0 # Disable random frame drops causing spikes
@@ -101,19 +102,35 @@ def play(args):
     env_cfg.domain_rand.randomize_base_mass = False
     env_cfg.domain_rand.randomize_base_com = False
 
-    env_cfg.commands.resample.adjust_obj_pose = False
+    env_cfg.commands.enable_out_of_view_drift = True # if True, add random walk drift when out of view
+    env_cfg.commands.resample.adjust_obj_pose = True
+    env_cfg.commands.resample.enable_success_feeding = True # If True, use success  feeding mechanism
+    env_cfg.commands.resample.feeding_prob = 0.3 # If True, use success  feeding mechanism
     env_cfg.commands.resample.force_look_upwards = False
     env_cfg.commands.resample.ranges.min_dist = 2.0
     env_cfg.commands.resample.ranges.max_dist = 3.0
-
-    env_cfg.noise.noise_scales.nav_pos_3d = [0.0, 0.0, 0.0] # Center noise [m] in Camera Frame (X, Y, Z)
-    env_cfg.noise.noise_scales.nav_scale_3d = 0.0 # Scale noise (proportional)
-    env_cfg.noise.noise_scales.nav_rot_3d = 0.1 # Rotation noise [rad] (~15 deg)
+    # env_cfg.commands.drift_scale = 0.0
             
+
+    # env_cfg.noise.noise_scales.nav_pos_3d = [0.0, 0.0, 0.0] # Center noise [m] in Camera Frame (X, Y, Z)
+    # env_cfg.noise.noise_scales.nav_scale_3d = 0.0 # Scale noise (proportional)
+    # env_cfg.noise.noise_scales.nav_rot_3d = 0.1 # Rotation noise [rad] (~15 deg)
+
     env_cfg.target.init.place_prob = 1.0
     env_cfg.target.init.vertical_prob = 0.0
-    env_cfg.target.shape.types = ["cuboid"]
-    # env_cfg.target.shape.dims_range = [[0.04, 0.06], [0.04, 0.06], [0.04, 0.06]] # [min, max] for x, y, z
+    env_cfg.target.perception.add_pre_pca_noise = True
+    env_cfg.target.perception.alpha_range = [1.0, 1.0] # Sigma points scaling factor range
+    # env_cfg.target.shape.types = ["ellipsoid"]
+    # env_cfg.target.shape.types = ["sphere"]
+    # env_cfg.target.shape.types = ["box"]
+    # env_cfg.target.shape.types = ["cuboid"]
+    # env_cfg.target.shape.dims_range = [[0.05, 0.10], [0.05, 0.10], [0.05, 0.10]] # longer pick cuboid
+    # env_cfg.target.shape.dims_range = [[0.05, 0.08], [0.05, 0.08], [0.05, 0.08]] # little pick cuboid
+    # env_cfg.target.shape.dims_range = [[0.04, 0.06], [0.04, 0.06], [0.04, 0.06]] # little box
+    # env_cfg.target.shape.box_dims_range = [[0.03, 0.2], [0.03, 0.2], [0.2, 0.35]] # long box
+    # env_cfg.target.shape.box_dims_range = [[0.03, 0.05], [0.03, 0.05], [0.03, 0.05]] # little place box
+    # env_cfg.target.shape.box_dims_range = [[0.03, 0.05], [0.03, 0.05], [0.2, 0.35]] # thin bucket
+    # env_cfg.target.shape.box_dims_range = [[0.25, 0.25], [0.35, 0.35], [0.15, 0.16]] # big box
 
     # prepare environment
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
@@ -211,7 +228,7 @@ def play(args):
         # If recording FPV, we force every frame. Otherwise defaults to visual downsampling.
         fpv_frame = env._draw_debug_vis(force_fpv=args.video_fpv)
         
-        if episode == 0 and not start_record:
+        if episode == 8 and not start_record:
             if args.npz:
                 start_record = True
                 i_now = i
@@ -272,7 +289,7 @@ def play(args):
             
             # Stop condition: Record for 300 steps (approx 6s)
             # if (i - i_now == 300):
-            if episode == 4:
+            if episode == 10:
                 # Save log data
                 if args.npz:
                     log_path = os.path.expanduser("~/sim_nav_log.npz")
@@ -305,9 +322,7 @@ def play(args):
         ori_cyaw = env.orig_nav_actions[0, 2].item()
         ori_cpitch = env.orig_nav_actions[0, 3].item()
 
-        sig_x = env.nav_commands[0, 0].item()
-        sig_y = env.nav_commands[0, 1].item()
-        sig_z = env.nav_commands[0, 2].item()
+
 
         base_x = env.sigma_points_base[0, 0, 0].item()
         base_y = env.sigma_points_base[0, 0, 1].item()

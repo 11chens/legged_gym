@@ -1,7 +1,7 @@
-import torch
 import time
-from .surface_geometry import SurfaceShape, Sphere, Cuboid, Cylinder
-from .perception_utils import compute_visibility_weights, project_points, compute_weighted_pca, generate_sigma_points, generate_structured_noisy_sigma_points
+from .surface_geometry import SurfaceShape, Sphere, Cuboid, Cylinder, Box, Ellipsoid
+from .perception_utils import compute_visibility_weights, compute_occlusion_mask, project_points, compute_weighted_pca, generate_sigma_points, generate_structured_noisy_sigma_points
+import torch
 from isaacgym.torch_utils import quat_apply
 
 class PCATargetTracker:
@@ -22,6 +22,7 @@ class PCATargetTracker:
         self.device = device
         self.num_envs = num_envs
         self.num_points = num_sample_points
+        self.alpha = 2.0  # Scaling factor for sigma points
         
         if local_points is not None and local_normals is not None:
             self.local_points = local_points
@@ -34,6 +35,10 @@ class PCATargetTracker:
                 self.shape = Cuboid(device)
             elif shape_type == 'cylinder':
                 self.shape = Cylinder(device)
+            elif shape_type == 'box':
+                self.shape = Box(device)
+            elif shape_type == 'ellipsoid':
+                self.shape = Ellipsoid(device)
             else:
                 raise ValueError(f"Unknown shape type: {shape_type}")
                 
@@ -79,7 +84,7 @@ class PCATargetTracker:
             dims[:, 0] = d
             dims[:, 1] = d
             dims[:, 2] = d
-        elif shape_type == 'cuboid':
+        elif shape_type == 'cuboid' or shape_type == 'box':
             # shape_params: [N, 3] (dims)
             dims[:] = shape_params
         elif shape_type == 'cylinder':
@@ -89,6 +94,9 @@ class PCATargetTracker:
             dims[:, 0] = d
             dims[:, 1] = d
             dims[:, 2] = h
+        elif shape_type == 'ellipsoid':
+            # shape_params: [N, 3] (dims: diameter_x, diameter_y, diameter_z)
+            dims[:] = shape_params
         return dims
     
 
@@ -119,7 +127,7 @@ class PCATargetTracker:
         return points_world, normals_world
 
 
-    def compute_features(self, object_pos, object_quat, camera_params, camera_transform, use_geometric_weight=True, noise_params=None, debug_timer=False, debug_info=False):
+    def compute_features(self, object_pos, object_quat, camera_params, camera_transform, use_geometric_weight=True, noise_params=None, pre_pca_noise_params=None, debug_timer=False, debug_info=False, alpha=None, noise_active_mask=None):
         """
         Computes PCA features for the tracked object.
         
@@ -129,9 +137,12 @@ class PCATargetTracker:
             camera_params (dict): Camera intrinsics.
             camera_transform (dict): Camera extrinsics ('R', 'T').
             use_geometric_weight (bool): Whether to use geometric weighting for anti-drift.
-            noise_params (dict, optional): Dict containing structured noise scales.
+            noise_params (dict, optional): Dict containing structured noise scales (post-PCA).
+            pre_pca_noise_params (dict, optional): Dict containing noise parameters for raw points (pre-PCA).
             debug_timer (bool): If True, prints timing info.
             debug_info (bool): If True, prints detailed debug information.
+            alpha (Tensor, optional): [num_envs, 1] Scaling factor for sigma points.
+            noise_active_mask (Tensor, optional): [num_envs] Boolean mask. If provided, pre-PCA noise is only applied where True.
             
         Returns:
             sigma_points_2d (Tensor): [num_envs, 5, 2]
@@ -143,6 +154,9 @@ class PCATargetTracker:
             sigma_points_3d (Tensor): [num_envs, 7, 3]
             is_valid (Tensor): [num_envs] Validity flag.
         """
+        if alpha is None:
+            alpha = self.alpha
+
         t0 = time.time()
         
         # 1. Transform to World Frame: points_world, normals_world: [num_envs, num_points, 3]
@@ -150,34 +164,83 @@ class PCATargetTracker:
         
         t1 = time.time()
         
-        # 2. Visibility: weights: [num_envs, num_points, 1]
-        cam_pos = camera_transform['T'] # [num_envs, 3] in world frame
-        weights = compute_visibility_weights(points_world, normals_world, cam_pos, use_geometric_weight=use_geometric_weight)
+        # 2. Projection: points_2d: [num_envs, num_points, 2], valid_mask: [num_envs, num_points]
+        # Valid mask already includes Z > 0 and inside FOV
+        points_2d, valid_mask = project_points(points_world, camera_params, camera_transform)
         
         t2 = time.time()
         
-        # 3. Projection: points_2d: [num_envs, num_points, 2], valid_mask: [num_envs, num_points]
-        points_2d, valid_mask = project_points(points_world, camera_params, camera_transform)
+        # 3. Visibility: weights: [num_envs, num_points, 1]
+        cam_pos = camera_transform['T'] # [num_envs, 3] in world frame
         
-        # Filter weights by valid mask (uv in image, z>0)
-        weights = weights * valid_mask.unsqueeze(-1).float()
+        # [BLOCKING DEPTH BUFFER]
+        # Build a Z-buffer using ALL points in FOV to handle self-occlusion.
+        # grid_res=64 combined with 5000 points provides a dense mask without "narrowing" faces.
+        R_cam = camera_transform['R']
+        delta = points_world - cam_pos.unsqueeze(1)
+        depths = torch.matmul(R_cam.unsqueeze(1), delta.unsqueeze(-1)).squeeze(-1)[..., 2]
+        
+        occlusion_mask = compute_occlusion_mask(points_2d, depths, valid_mask, grid_res=64)
+        
+        # Local Visibility (Back-face culling)
+        # ONLY AFTER blocking do we apply the normal-based culling
+        weights = compute_visibility_weights(points_world, normals_world, cam_pos, use_geometric_weight=use_geometric_weight)
+        
+        # Combine everything
+        weights = weights * occlusion_mask * valid_mask.unsqueeze(-1).float()
         
         t3 = time.time()
         
+        # [PRE-PCA NOISE INJECTION]
+        # Simulate imperfect perception (segmentation noise, depth noise, outliers)
+        # Note: We must apply noise to points that are used for PCA.
+        # 2D case: points_2d
+        # 3D case: points_camera (computed later)
+        
+        # For 2D PCA, we act on points_2d.
+        points_2d_noisy = points_2d.clone()
+        
+        if pre_pca_noise_params is not None:
+             # Prepare mask broadcasting
+             mask_broad = 1.0
+             if noise_active_mask is not None:
+                 mask_broad = noise_active_mask.view(-1, 1, 1).float()
+
+             # 1. Pixel Noise (2D)
+             if 'pixel_std' in pre_pca_noise_params and pre_pca_noise_params['pixel_std'] > 0:
+                 noise = torch.randn_like(points_2d) * pre_pca_noise_params['pixel_std']
+                 points_2d_noisy += noise * mask_broad
+                 
+             # 2. Outliers (2D) - random points in [0,1]
+             if 'outlier_prob' in pre_pca_noise_params and pre_pca_noise_params['outlier_prob'] > 0:
+                 prob = pre_pca_noise_params['outlier_prob']
+                 mask = torch.rand(points_2d.shape[:2], device=self.device) < prob
+                 
+                 # Only apply outliers where noise is active
+                 if noise_active_mask is not None:
+                      mask = mask & noise_active_mask.unsqueeze(-1)
+
+                 # Replace masked points with random uniform noise
+                 outliers = torch.rand((mask.sum(), 2), device=self.device)
+                 points_2d_noisy[mask] = outliers
+
+        
         # 4. PCA (2D): mean_2d: [num_envs, 2], eigvals_2d: [num_envs, 2], eigvecs_2d: [num_envs, 2, 2], valid_2d: [num_envs]
-        mean_2d, eigvals_2d, eigvecs_2d, valid_2d = compute_weighted_pca(points_2d, weights)
+        # Use noisy points for PCA inputs
+        mean_2d, eigvals_2d, eigvecs_2d, valid_2d = compute_weighted_pca(points_2d_noisy, weights)
         
         # 5. Generate 2D Sigma Points: sigma_points_2d: [num_envs, 5, 2] in Image Plane
+
         if noise_params is not None:
             sigma_points_2d = generate_structured_noisy_sigma_points(
                 mean_2d, eigvals_2d, eigvecs_2d, 
                 pos_noise=noise_params.get('pos_2d', 0),
                 scale_noise=noise_params.get('scale_2d', 0),
                 rot_noise=noise_params.get('rot_2d', 0),
-                alpha=2.0
+                alpha=alpha
             )
         else:
-            sigma_points_2d = generate_sigma_points(mean_2d, eigvals_2d, eigvecs_2d, alpha=2.0)
+            sigma_points_2d = generate_sigma_points(mean_2d, eigvals_2d, eigvecs_2d, alpha=alpha)
 
         t4 = time.time()
         
@@ -189,8 +252,48 @@ class PCATargetTracker:
         # P_cam = R_cam * (P_world - T_cam)
         points_camera = torch.matmul(R_cam.unsqueeze(1), (points_world - T_cam.unsqueeze(1)).unsqueeze(-1)).squeeze(-1)
         
+        # [PRE-PCA NOISE INJECTION 3D]
+        points_camera_noisy = points_camera.clone()
+        if pre_pca_noise_params is not None:
+            # 1. Depth Noise (Z-axis in camera frame)
+            # Noise model: sigma = const + slope * depth
+            depth = points_camera[..., 2]
+            std_const = pre_pca_noise_params.get('depth_std_const', 0.0)
+            std_slope = pre_pca_noise_params.get('depth_std_slope', 0.0)
+            
+            if std_const > 0 or std_slope > 0:
+                depth_sigma = std_const + std_slope * torch.abs(depth)
+                z_noise = torch.randn_like(depth) * depth_sigma
+                if noise_active_mask is not None:
+                     z_noise = z_noise * noise_active_mask.unsqueeze(-1)
+                points_camera_noisy[..., 2] += z_noise
+                
+            # 2. Lateral Background Noise (X, Y in camera frame)
+            lat_std = pre_pca_noise_params.get('lateral_std', 0.0)
+            if lat_std > 0:
+                xy_noise = torch.randn_like(points_camera[..., :2]) * lat_std
+                if noise_active_mask is not None:
+                     xy_noise = xy_noise * noise_active_mask.unsqueeze(-1).unsqueeze(-1)
+                points_camera_noisy[..., :2] += xy_noise
+                
+            # 3. Outliers (3D)
+            # Add random points around the object to simulate background segmentation spillover
+            if 'outlier_prob' in pre_pca_noise_params and pre_pca_noise_params['outlier_prob'] > 0:
+                prob = pre_pca_noise_params['outlier_prob']
+                outlier_range = pre_pca_noise_params.get('outlier_range', 0.2)
+                mask = torch.rand(points_camera.shape[:2], device=self.device) < prob
+
+                # Only apply outliers where noise is active
+                if noise_active_mask is not None:
+                      mask = mask & noise_active_mask.unsqueeze(-1)
+                
+                # Perturb existing points heavily to make them outliers
+                # Shift them by a random vector in [0, range]
+                perturbation = torch.rand((mask.sum(), 3), device=self.device) * outlier_range
+                points_camera_noisy[mask] += perturbation
+
         # mean_3d_cam: [num_envs, 3], eigvals_3d: [num_envs, 3], eigvecs_3d: [num_envs, 3, 3]
-        mean_3d_cam, eigvals_3d, eigvecs_3d, valid_3d = compute_weighted_pca(points_camera, weights)
+        mean_3d_cam, eigvals_3d, eigvecs_3d, valid_3d = compute_weighted_pca(points_camera_noisy, weights)
         
         # 7. Generate 3D Sigma Points in CAMERA FRAME with structured noise
         if noise_params is not None:
@@ -199,10 +302,10 @@ class PCATargetTracker:
                 pos_noise=noise_params.get('pos_3d', 0),
                 scale_noise=noise_params.get('scale_3d', 0),
                 rot_noise=noise_params.get('rot_3d', 0),
-                alpha=2.0
+                alpha=alpha
             )
         else:
-            sigma_points_3d_cam = generate_sigma_points(mean_3d_cam, eigvals_3d, eigvecs_3d, alpha=2.0)
+            sigma_points_3d_cam = generate_sigma_points(mean_3d_cam, eigvals_3d, eigvecs_3d, alpha=alpha)
         
         # Transform noisy sigma points back to World Frame (to maintain tracker output consistency)
         # P_world = R_cam^T * P_cam + T_cam

@@ -41,7 +41,9 @@ else:
     NUM_SIGMA_POINTS = 5 # 2*2 + 1
     NUM_NAV_COMMANDS = 15 # 5 points * 3 coords (u, v, z) in Image Plane
 
-NUM_NAV_COMMANDS = 3 * 3 # only main axis (2D)
+# NUM_NAV_COMMANDS = (2 * 1 + 1) * 3 # only main axis (2D)
+# NUM_NAV_COMMANDS = (2 * 2 + 1) * 3 # two axis points (3D)
+NUM_NAV_COMMANDS = (2 * 3 + 1) * 3 # all sigma points (3D)
 EPISODE_LENGTH_S = 6
 USE_RNN = False # Decrepated: Use ActorCriticRecurrentEncoder instead
 
@@ -49,20 +51,25 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
     target = TargetCfg
     debug_viz = True
     pixel_gain = 10.0
+    class loco:
+        use_loco_policy = True
+        loco_body_model_file = 'controller/pitch/model_light.jit'
+        # loco_body_model_file = 'controller/pitch/model.jit'
+        loco_obs_dim = 47
+        loco_history_len = 5
+
     class env(LeggedRobotNavCfg.env):
         use_3d_sigma_points = USE_3D_SIGMA_POINTS
         sigma_frame = "camera" # "base", "camera", "image"
         num_position = 3 # x, y, z
         num_nav_actions = 4 # vx, vy, vyaw, pitch
         nav_history_len = 10
-        history_len = 5
+        history_len = 5 # Revert to 5 for GRU hybrid design
         num_sigma_points = NUM_SIGMA_POINTS
         num_nav_commands = NUM_NAV_COMMANDS
         num_task_flags = 1
         num_props = num_nav_actions + num_nav_commands + num_task_flags + 9 # (lin_vel(3)), ang_vel(3), gravity(3)
-        # num_props = num_nav_commands + 47 + num_nav_actions
-        # num_priv = NUM_SIGMA_POINTS * 3 # P_camera [N, M, 3] flattened
-        num_priv = 0
+        num_priv = 1 # task_id
         
         if USE_RNN: # Decrepated: Use ActorCriticRecurrentEncoder instead
             num_observations = num_props * history_len
@@ -76,8 +83,9 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
         debug_viz = False
 
         # Optimal Grasp Pose Parameters
-        grasp_offset_long = 0.0 # [m] Distance from long-axis vertex (Head/Tail)
-        grasp_offset_short = 0.0 # [m] Distance from object surface (Short axis)
+        grasp_offset_long = -0.0 # [m] Distance from long-axis vertex (Head/Tail)
+        grasp_offset_short = -0.05 # [m] Distance from object surface (Short axis)
+        grasp_offset_place = -0.1 # [m] Distance from object surface (Short axis)
         
         # Hint Pose Parameters
         hint_dist_long = 0.4 # [m] Distance from long-axis vertex for hint pose
@@ -119,11 +127,18 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
         # invalid commands
         enable_invalid_cmds = True
         enable_out_of_view_drift = True # if True, add random walk drift when out of view
-        drift_scale = 0.005 # scale of the random walk drift per step
+        drift_scale = 0.01 # scale of the random walk drift per step
+        max_drift = 0.1 # [m] maximum drift distance
+        dummy_sigma_offset = 0.05 # [m] maximum offset for dummy sigma points when perception is invalid
         # max_out_of_view_duration = 2.0 # [s] the duration to keep the out of view coordinates
+
+        enable_place_offset = False # If True, apply z-offset when placing, farther away from the object
+        place_offset_value = 0.2 # [m] z-offset when placing
+        place_offset_error_margin = 0.05 # [m] error margin for place offset
 
         frame_drop_prob = 0.05 # Probability of dropping a frame (simulating sensor failure)
         hold_time_s = 1.0 # [s] time to hold to consider as success
+        place_pitch_target = 0.0 # [rad] target pitch angle when placing
 
         class ranges:
             limit_vx = [-0.5, 0.5]  # [m/s]
@@ -135,17 +150,19 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
         class resample:
             adjust_obj_pose = True
             force_look_upwards = True
-            feeding_prob = 0.3 # Probability of feeding when using success feeding
-            force_lookup_prob = 0.3 # Probability of forcing a look-up when adjusting object pose
+            enable_success_feeding = True # If True, use success  feeding mechanism
+            feeding_prob = 0.33 # Probability of feeding when using success feeding
+            force_lookup_prob = 0.2 # Probability of forcing a look-up when adjusting object pose
             min_steps = 100 # Minimum steps before resampling on the way
             look_up_duration = 0.5 # [s] Duration to maintain look-up pitch
             
             # Replay failed scenarios
-            replay_failed_prob = 0.8 # Probability of replaying a failed scenario
+            replay_failed_prob = 0.7 # Probability of replaying a failed scenario
             replay_min_success_ratio = 0.0 # Minimum success ratio to start replaying
 
             class ranges:
-                dist_fwd = [0.1, 0.5] # min max [m]
+                # dist_fwd = [0.1, 0.5] # min max [m]
+                dist_fwd = [0.0, 0.3] # min max [m]
                 dist_lat = [-0.1, 0.1] # min max [m]
                 min_dist = 0.5  # minimum time to reach the target [s]
                 max_dist = 1.5  # maximum time to reach the target [s]
@@ -179,14 +196,6 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
 
         class intrinsics: # Intrinsics parameters
             horizontal_fov = 70.26
-            # img_width = 320
-            # img_height = 240
-            # fx = 303.1788635253906 # fx = img_width / (2 * tan(horizontal_fov/2))
-            # fy = 302.993408203125
-            # cx = 163.8466033935547
-            # cy = 123.1241226196289
-
-            # 320*180
             img_width = 320
             img_height = 180
             fx = 227.3841552734375
@@ -200,18 +209,18 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
 
         class extrinsics: # Extrinsics parameters
             #  ================= fixed extrinsics =================
-            translation = [0.305, 0.017, 0.128]  # Translation: forward, left, upward
-            angles = [0.0, 30.0, 0.0]  # Euler angles: yaw, pitch, roll
+            translation = [0.305, 0.017, 0.138]  # Translation: forward, left, upward
+            angles = [0.0, 35.0, 0.0]  # Euler angles: yaw, pitch, roll
             
             #  ================= random extrinsics =================
             # Randomization ranges around the fixed extrinsics
             yaw_range = [-0.5, 0.5]   # [degree]
-            pitch_range = [-2.0, 5.0] # [degree]
+            pitch_range = [-3.0, 3.0] # [degree]
             roll_range = [-0.5, 0.5]  # [degree]
 
-            dx_range = [-0.01, 0.01]   # [m]
+            dx_range = [-0.02, 0.02]   # [m]
             dy_range = [-0.005, 0.005]   # [m]
-            dz_range = [-0.01, 0.01]   # [m]
+            dz_range = [-0.02, 0.02]   # [m]
 
     class control( LeggedRobotNavCfg.control ):
         # PD Drive parameters:
@@ -334,12 +343,12 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
             conditional_alignment = 0.0
             target_directed_velocity = 0.0
             visual_foreshortening = 0.0
-            missing_sigma_points = -0.2
+            missing_sigma_points = -0.5
             optimal_pos_tracking = 0.0 # 1.0
-            successful_grasp = 30.0
-            backup = -1.0
+            successful_grasp = 20.0
+            backup = -4
             sequential_reaching = 0.4
-            place_right_pitch = 1.0
+            place_right_pitch = 0.3
 
         soft_dof_pos_limit = 0.95
         base_height_target = 0.25
@@ -351,7 +360,11 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
         soft_torque_limit = 0.85
         max_contact_force = 100.
         tracking_sigma = 0.1
-        weight_track_pos = 2.0
+        weight_track_pick_pos = 2.0
+        weight_track_place_pos = 5.0
+        rot_track_sigma = 0.02
+        pos_track_sigma = 0.02
+        soft_sigma = 0.04
 
 class Go2NavFlatCfgPPO( LeggedRobotCfgPPO ):
     runner_class_name = 'OnPolicyRunner'
@@ -373,6 +386,7 @@ class Go2NavFlatCfgPPO( LeggedRobotCfgPPO ):
             policy_class_name = 'ActorCriticRecurrent'
         else:
             policy_class_name = 'ActorCriticEncoder'
+            # policy_class_name = 'ActorCriticTCN'
             # policy_class_name = "ActorCriticRecurrentEncoder"
         algorithm_class_name = 'PPO'
 
@@ -384,9 +398,9 @@ class Go2NavFlatCfgPPO( LeggedRobotCfgPPO ):
         actor_hidden_dims = [256, 128, 64]
         critic_hidden_dims = [256, 128, 64]
 
-        actor_hidden_dims = [128, 64, 32]
-        critic_hidden_dims = [128, 64, 32]
-        has_encoder = False
+        # actor_hidden_dims = [128, 64, 32]
+        # critic_hidden_dims = [128, 64, 32]
+        has_encoder = True
         # rnn_hidden_size = 128
 
         # actor_hidden_dims = [128, 64, 32]

@@ -43,6 +43,7 @@ parser = argparse.ArgumentParser(description="Run the Go2 robot in navigation en
 parser.add_argument("--debug", action="store_true", help="Enable debug mode.")
 parser.add_argument("--headless", action="store_true", default=False, help="Force display off at all times.")
 parser.add_argument("--num_envs", type=int, default=4096, help="Number of environments to train on simultaneously.")
+parser.add_argument("--max_iterations", type=int, default=10000, help="Maximum number of training iterations.")
 args = parser.parse_args()
 
 if args.debug:
@@ -60,7 +61,8 @@ if args.debug:
 def train(args):
     env, env_cfg = task_registry.make_env(name=args.task, args=args)
     ppo_runner, train_cfg = task_registry.make_alg_runner(env=env, name=args.task, args=args)
-    ppo_runner.learn(num_learning_iterations=train_cfg.runner.max_iterations, init_at_random_ep_len=True)
+    # ppo_runner.learn(num_learning_iterations=train_cfg.runner.max_iterations, init_at_random_ep_len=True)
+    ppo_runner.learn(num_learning_iterations=args.max_iterations, init_at_random_ep_len=True)
 
 if __name__ == '__main__':
     args = get_args(args)

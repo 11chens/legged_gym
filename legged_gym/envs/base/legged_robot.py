@@ -526,7 +526,7 @@ class LeggedRobot(BaseTask):
             pitch = torch.zeros_like(self.root_states[env_ids, 3])
         
         self.root_states[env_ids, 3:7] = quat_from_euler_xyz(roll, pitch, _yaw)
-
+        self.base_quat[env_ids] = self.root_states[env_ids, 3:7]
 
         env_ids_int32 = env_ids.to(dtype=torch.int32)
         self.gym.set_actor_root_state_tensor_indexed(self.sim,
