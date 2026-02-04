@@ -70,7 +70,7 @@ def play(args):
     env: LeggedRobotNav
     env_cfg: Go2NavFlatCfg
 
-    args.load_run = '02_01_22-25-47_'
+    # args.load_run = '02_04_00-41-39_'
     # args.checkpoint = 2400
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     # override some parameters for testing
@@ -116,7 +116,7 @@ def play(args):
     # env_cfg.noise.noise_scales.nav_scale_3d = 0.0 # Scale noise (proportional)
     # env_cfg.noise.noise_scales.nav_rot_3d = 0.1 # Rotation noise [rad] (~15 deg)
 
-    env_cfg.target.init.place_prob = 1.0
+    env_cfg.target.init.place_prob = 0.0
     env_cfg.target.init.vertical_prob = 0.0
     env_cfg.target.perception.add_pre_pca_noise = True
     env_cfg.target.perception.alpha_range = [1.0, 1.0] # Sigma points scaling factor range
@@ -201,7 +201,11 @@ def play(args):
             # Prepare inputs
             priv, obs = ppo_runner.alg.actor_critic.get_priv_separated(obs)
             if model.is_recurrent:
-                current_prop, _ = ppo_runner.alg.actor_critic.extract_obs(obs)
+                if hasattr(ppo_runner.alg.actor_critic, 'get_current_frame'):
+                    current_prop = ppo_runner.alg.actor_critic.get_current_frame(obs)
+                else:
+                    current_prop, _ = ppo_runner.alg.actor_critic.extract_obs(obs)
+                
                 obs_cpu = current_prop.detach().cpu().numpy()
                 ort_inputs = {'obs': obs_cpu, 'h_in': h_state}
                 ort_outs = ort_sess.run(None, ort_inputs)

@@ -69,7 +69,7 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
         num_nav_commands = NUM_NAV_COMMANDS
         num_task_flags = 1
         num_props = num_nav_actions + num_nav_commands + num_task_flags + 9 # (lin_vel(3)), ang_vel(3), gravity(3)
-        num_priv = 1 # task_id
+        num_priv = 1 + NUM_NAV_COMMANDS # task_id + nav commands
         
         if USE_RNN: # Decrepated: Use ActorCriticRecurrentEncoder instead
             num_observations = num_props * history_len
@@ -126,8 +126,8 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
         nav_refresh_steps_range = [1, 2] 
         # invalid commands
         enable_invalid_cmds = True
-        enable_out_of_view_drift = True # if True, add random walk drift when out of view
-        drift_scale = 0.01 # scale of the random walk drift per step
+        enable_out_of_view_drift = False # if True, add random walk drift when out of view
+        drift_scale = 0.02 # scale of the random walk drift per step
         max_drift = 0.1 # [m] maximum drift distance
         dummy_sigma_offset = 0.05 # [m] maximum offset for dummy sigma points when perception is invalid
         # max_out_of_view_duration = 2.0 # [s] the duration to keep the out of view coordinates
@@ -138,7 +138,7 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
 
         frame_drop_prob = 0.05 # Probability of dropping a frame (simulating sensor failure)
         hold_time_s = 1.0 # [s] time to hold to consider as success
-        place_pitch_target = 0.0 # [rad] target pitch angle when placing
+        place_pitch_target = -0.20 # [rad] target pitch angle when placing
 
         class ranges:
             limit_vx = [-0.5, 0.5]  # [m/s]
@@ -155,6 +155,7 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
             force_lookup_prob = 0.2 # Probability of forcing a look-up when adjusting object pose
             min_steps = 100 # Minimum steps before resampling on the way
             look_up_duration = 0.5 # [s] Duration to maintain look-up pitch
+            resample_interval_steps = 150 # Resample every N steps
             
             # Replay failed scenarios
             replay_failed_prob = 0.7 # Probability of replaying a failed scenario
@@ -210,7 +211,7 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
         class extrinsics: # Extrinsics parameters
             #  ================= fixed extrinsics =================
             translation = [0.305, 0.017, 0.138]  # Translation: forward, left, upward
-            angles = [0.0, 35.0, 0.0]  # Euler angles: yaw, pitch, roll
+            angles = [0.0, 33.0, 0.0]  # Euler angles: yaw, pitch, roll
             
             #  ================= random extrinsics =================
             # Randomization ranges around the fixed extrinsics
@@ -385,18 +386,19 @@ class Go2NavFlatCfgPPO( LeggedRobotCfgPPO ):
         if USE_RNN:
             policy_class_name = 'ActorCriticRecurrent'
         else:
-            policy_class_name = 'ActorCriticEncoder'
+            # policy_class_name = 'ActorCriticEncoder' # good performance
             # policy_class_name = 'ActorCriticTCN'
-            # policy_class_name = "ActorCriticRecurrentEncoder"
+            # policy_class_name = "ActorCriticRecurrentEncoder" # bad performance
+            policy_class_name = "ActorCriticRecurrentLight" # bad performance
         algorithm_class_name = 'PPO'
 
     class policy( LeggedRobotCfgPPO.policy ):
-        # actor_hidden_dims = [512, 256, 128]
-        # critic_hidden_dims = [512, 256, 128]
+        actor_hidden_dims = [512, 256, 128]
+        critic_hidden_dims = [512, 256, 128]
         rnn_type = 'gru'
 
-        actor_hidden_dims = [256, 128, 64]
-        critic_hidden_dims = [256, 128, 64]
+        # actor_hidden_dims = [256, 128, 64]
+        # critic_hidden_dims = [256, 128, 64]
 
         # actor_hidden_dims = [128, 64, 32]
         # critic_hidden_dims = [128, 64, 32]

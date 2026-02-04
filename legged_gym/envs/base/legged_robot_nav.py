@@ -680,8 +680,10 @@ class LeggedRobotNav(LeggedRobot):
         """ Resample object pose once per episode when during navigation
         """
         # Avoid resampling immediately after reset (e.g. first 100 steps)
-        valid_time = self.episode_length_buf > self.cfg.commands.resample.min_steps
-        to_move = ((~self.object_moved) & valid_time)
+        # valid_time = self.episode_length_buf > self.cfg.commands.resample.min_steps
+        valid_time = self.episode_length_buf % self.cfg.commands.resample.resample_interval_steps == 0
+        # to_move = ((~self.object_moved) & valid_time)
+        to_move = valid_time
         env_ids_resample = to_move.nonzero(as_tuple=False).flatten()
 
         # initial_time = self.episode_length_buf <= 20
@@ -1013,14 +1015,11 @@ class LeggedRobotNav(LeggedRobot):
         opt_pos = closest_vertex + outward_dir * offset
         opt_dir = -outward_dir # Face towards object
         
-        # Dynamic Pitch Calculation
-        # Vector from Gripper to Target
-        # Note: opt_pos z is usually 0 (ground) or low.
-        # Gripper is usually higher.
-        # So dz < 0 -> Pitch > 0 (Look down).
-        vec_grip_to_target = opt_pos - self.gripper_world
-        d_xy = torch.norm(vec_grip_to_target[:, :2], dim=1)
-        d_z = vec_grip_to_target[:, 2]
+        # Dynamic Pitch Calculation - Base Frame
+        # Vector from Base to Target
+        vec_base_to_target = opt_pos - self.root_states[:, :3]
+        d_xy = torch.norm(vec_base_to_target[:, :2], dim=1)
+        d_z = vec_base_to_target[:, 2]
         pitch_dynamic = torch.atan2(-d_z, d_xy)
         
         # 4. Hint Pose
@@ -1052,10 +1051,10 @@ class LeggedRobotNav(LeggedRobot):
         opt_pos = self.object_pos - axis_inward * (radius + offset)
         opt_dir = axis_inward # Face towards object
         
-        # Dynamic Pitch Calculation
-        vec_grip_to_target = opt_pos - self.gripper_world
-        d_xy = torch.norm(vec_grip_to_target[:, :2], dim=1)
-        d_z = vec_grip_to_target[:, 2]
+        # Dynamic Pitch Calculation - Base Frame
+        vec_base_to_target = opt_pos - self.root_states[:, :3]
+        d_xy = torch.norm(vec_base_to_target[:, :2], dim=1)
+        d_z = vec_base_to_target[:, 2]
         pitch_dynamic = torch.atan2(-d_z, d_xy)
         
         # 3. Hint Pose
@@ -1093,18 +1092,20 @@ class LeggedRobotNav(LeggedRobot):
         opt_pos[:, 2] = self.object_pos[:, 2] + self.object_dims[:, 2] / 2.0 + clearance
         opt_dir = axis_inward
 
-        # Dynamic Pitch Calculation
-        vec_grip_to_target = opt_pos - self.gripper_world
-        d_xy = torch.norm(vec_grip_to_target[:, :2], dim=1)
-        d_z = vec_grip_to_target[:, 2]
-        # pitch_dynamic = torch.atan2(-d_z, d_xy)
-        pitch_fixed = torch.ones_like(d_xy) * (self.cfg.commands.place_pitch_target)
+        # Dynamic Pitch Calculation - Base Frame
+        vec_base_to_target = opt_pos - self.root_states[:, :3]
+        d_xy = torch.norm(vec_base_to_target[:, :2], dim=1)
+        d_z = vec_base_to_target[:, 2]
+        pitch_dynamic = torch.atan2(-d_z, d_xy)
+        # pitch_fixed = torch.ones_like(d_xy) * (self.cfg.commands.place_pitch_target)
+        self.pitch_target = pitch_dynamic
+        # self.pitch_target = pitch_fixed
         # 3. Hint Pose (same XY logic, but at surface+clearance)
         hint_pos = self.env_start_pos + axis_inward * hint_dist_from_start
         hint_pos[:, 2] = self.object_pos[:, 2] + self.object_dims[:, 2] / 2.0 + clearance
 
         # 4. Compute Quaternions
-        opt_quat = self._compute_quat_from_dir(opt_dir, pitch_fixed)
+        opt_quat = self._compute_quat_from_dir(opt_dir, self.pitch_target)
         hint_quat = opt_quat.clone()
 
         return opt_pos, opt_quat, opt_dir, hint_pos, hint_quat
@@ -1156,7 +1157,7 @@ class LeggedRobotNav(LeggedRobot):
         roll_r, pitch_r, yaw_r = get_euler_xyz(self.base_quat)
         roll_t, pitch_t, yaw_t = get_euler_xyz(self.optimal_grasp_quat)
         # pitch_t_clipped = torch.clamp(pitch_t, min=self.nav_clip_min[-1], max=self.nav_clip_max[-1])
-        pitch_t_clipped = torch.clamp(wrap_to_pi(pitch_t), min=-0.35, max=0.42)  # Clip between -24 to 24 degrees
+        pitch_t_clipped = torch.clamp(wrap_to_pi(pitch_t), min=-0.2, max=0.40)  # Clip between -24 to 24 degrees
         pitch_r_warped = wrap_to_pi(pitch_r)
 
         self.roll_err = torch.abs(wrap_to_pi(roll_r - roll_t))
@@ -1786,7 +1787,8 @@ class LeggedRobotNav(LeggedRobot):
                 self.nav_commands.unsqueeze(1)
             ], dim=1)
         )  
-        
+
+        self.all_valid_sigma_points = sigma_points_obs_unmasked.reshape(self.num_envs, -1)
         self.sigma_points_3d = sigma_points_3d
         self.sigma_points_2d = sigma_points_2d
         self.is_valid = is_valid
@@ -2044,7 +2046,9 @@ class LeggedRobotNav(LeggedRobot):
             ], dim=1)
         
         # 8. priv + obs
-        self.obs_buf = torch.cat([self.task_id, self.obs_hist_buffer.view(self.num_envs, -1)], dim=-1)
+        self.obs_buf = torch.cat([self.task_id, \
+                                self.all_valid_sigma_points, \
+                                self.obs_hist_buffer.view(self.num_envs, -1)], dim=-1)
 
     # ------------- Cameras -------------
     def attach_camera(self, env_handle, actor_handle):
@@ -2312,7 +2316,7 @@ class LeggedRobotNav(LeggedRobot):
         Given continuously while the robot maintains the state.
         """
         r_rot = torch.exp(-self.rot_error_sq_near / self.cfg.rewards.rot_track_sigma) # sigma ~ 0.14 rad
-        r_pos_short_pick = torch.exp(-self.pos_error_sq / self.cfg.rewards.soft_sigma) # sigma ~ 0.14 m
+        r_pos_short_pick = torch.exp(-self.pos_error_sq / self.cfg.rewards.pos_track_sigma) # sigma ~ 0.14 m
         r_pos_long_pick = torch.exp(-self.pos_error_sq / self.cfg.rewards.pos_track_sigma) # sigma ~ 0.14 m
         r_pos_place = torch.exp(-self.pos_error_sq_place / self.cfg.rewards.soft_sigma) # sigma ~ 0.14 m
 
@@ -2322,8 +2326,8 @@ class LeggedRobotNav(LeggedRobot):
 
         # _rew_pick = self.is_pick * r_rot * (1 + self.cfg.rewards.weight_track_pick_pos * r_pos_pick)
 
-        _rew_short_pick = self.is_pick * (~self.obj_is_too_long) * r_rot * (1.0 + 5.0 * r_pos_short_pick)
-        _rew_long_pick = self.is_pick * (self.obj_is_too_long) * r_rot * (2.5 + self.cfg.rewards.weight_track_pick_pos * r_pos_long_pick)
+        _rew_short_pick = self.is_pick * (~self.obj_is_too_long) * r_rot * (1.0 + 2.0 * r_pos_short_pick)
+        _rew_long_pick = self.is_pick * (self.obj_is_too_long) * r_rot * (2.0 + self.cfg.rewards.weight_track_pick_pos * r_pos_long_pick)
         _rew_pick = _rew_short_pick + _rew_long_pick
         _rew_place = self.is_place * r_rot * (0.5 + self.cfg.rewards.weight_track_place_pos * r_pos_place)
 
@@ -2377,13 +2381,13 @@ class LeggedRobotNav(LeggedRobot):
         r_rot = (~self.near_target).float() * torch.exp(-self.rot_error_sq_far / self.cfg.rewards.rot_track_sigma) + \
                 1 * (self.near_target).float() * torch.exp(-self.rot_error_sq_near / self.cfg.rewards.rot_track_sigma)  # sigma ~ 0.14 rad
         
-        r_pos_short_pick = torch.exp(-self.pos_error_sq / self.cfg.rewards.soft_sigma) # sigma ~ 0.14 m
+        r_pos_short_pick = torch.exp(-self.pos_error_sq / self.cfg.rewards.pos_track_sigma) # sigma ~ 0.14 m
         r_pos_long_pick = torch.exp(-self.pos_error_sq / self.cfg.rewards.pos_track_sigma) # sigma ~ 0.14 m
         r_pos_place = torch.exp(-self.pos_error_sq_place / self.cfg.rewards.soft_sigma) # sigma ~ 0.14 m
 
         # 3. Goal Reaching Reward (Pulls along line to Optimal)
-        _rew_short_pick = self.is_pick * (~self.obj_is_too_long) * r_path * r_rot * (1.0 + 5.0 * r_pos_short_pick)
-        _rew_long_pick = self.is_pick * (self.obj_is_too_long) * r_path * r_rot * (2.5 + self.cfg.rewards.weight_track_pick_pos * r_pos_long_pick)
+        _rew_short_pick = self.is_pick * (~self.obj_is_too_long) * r_path * r_rot * (1.0 + 2.0 * r_pos_short_pick)
+        _rew_long_pick = self.is_pick * (self.obj_is_too_long) * r_path * r_rot * (2.0 + self.cfg.rewards.weight_track_pick_pos * r_pos_long_pick)
         _rew_pick = _rew_short_pick + _rew_long_pick
         _rew_place = self.is_place * r_path * r_rot * (0.5 + self.cfg.rewards.weight_track_place_pos * r_pos_place)
 

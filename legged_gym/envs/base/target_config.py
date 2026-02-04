@@ -18,11 +18,11 @@ class TargetCfg:
         dims_range = [[0.03, 0.05], [0.15, 0.2], [0.03, 0.05]] # [[], [0.15, 0.2], []]
         
         # Ellipsoid dimensions (Short logic task)
-        ellipsoid_dims_range = [[0.04, 0.10], [0.04, 0.10], [0.04, 0.10]] # [min, max] for x, y, z (diameters)
+        ellipsoid_dims_range = [[0.03, 0.06], [0.03, 0.06], [0.03, 0.06]] # [min, max] for x, y, z (diameters)
         
         # Box dimensions for Place task (Large Cuboid)
         # box_dims_range = [[0.03, 0.3], [0.03, 0.3], [0.2, 0.35]] # [min, max] for x, y, z
-        box_dims_range = [[0.15, 0.3], [0.15, 0.3], [0.15, 0.2]] # [min, max] for x, y, z
+        box_dims_range = [[0.15, 0.3], [0.15, 0.3], [0.15, 0.25]] # [min, max] for x, y, z
         # box_dims_range = [[0.2, 0.2], [0.2, 0.2], [0.15, 0.35]] # [min, max] for x, y, z
         
         # Place Task Parameters
@@ -43,7 +43,7 @@ class TargetCfg:
             'depth_std_slope': 0.05, # Depth noise = depth * slope (e.g. 5% depth error)
             'depth_std_const': 0.01, # Constant depth noise term (m)
             'lateral_std': 0.01, # 3D Lateral noise (m), simulating partial background inclusion
-            'outlier_prob': 0.1, # 5% of points are random outliers
+            'outlier_prob': 0.05, # 5% of points are random outliers
             'outlier_range': 0.1, # Outliers are within + 20cm of the object center
         }
 
