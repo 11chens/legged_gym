@@ -58,12 +58,12 @@ $$\bar{\mathbf{u}}_{T+\delta} = \frac{1}{k} \big( \underbrace{\sum_{j=0}^{\delta
 物理意义: 随着时间推移，旧的“准确记忆”逐渐过期移出窗口，动作会慢慢退化为噪声。
 但关键在于: 只要 $k$ 足够大（例如覆盖 0.4s），机器人完全有足够的时间在有效信号衰减完之前，完成闭合夹爪的动作。
 四、 代码实现 Checklist
-请按照以下步骤修改你的代码：
+请按照以下步骤修改或者新增代码：
 Modify Policy Output Head:
 Python
 # 假设 hidden_dim 是 MLP 最后一层
 # action_dim = 4 (vx, vy, w, pitch)
-# chunk_size = 10
+# chunk_size = 10 # 这个数值写在Config中
 self.action_head = nn.Linear(hidden_dim, action_dim * chunk_size)
 
 
@@ -98,15 +98,15 @@ class ActionIntegrator:
 
 Add Visual Dropout (During Training):
 Python
-# 在 get_action 前
-if self.training and torch.rand(1) < 0.1:
+# 在 get_nav_commands中新增
+if torch.rand(1) < 0.1:  #伪代码
     obs[:, :visual_dim] = -1.0 # 屏蔽视觉部分
 
 
-Add Smoothness Penalty (In Loss):
+Add Smoothness Penalty (In PPO Loss):
 Python
-# new_chunk: [Batch, k, 4]
-diff = new_chunk[:, 1:, :] - new_chunk[:, :-1, :]
+# new_chunk: [Batch, k, 4] 
+diff = new_chunk[:, 1:, :] - new_chunk[:, :-1, :] #伪代码
 loss_smooth = torch.mean(diff ** 2)
 total_reward -= 0.01 * loss_smooth
 

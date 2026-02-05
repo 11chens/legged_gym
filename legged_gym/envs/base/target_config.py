@@ -11,14 +11,14 @@ class TargetCfg:
         # For mixed
         types = ["cylinder", "cuboid", "sphere", "box", "ellipsoid"]
         # Randomization Ranges
-        radius_range = [0.02, 0.04] # [m]
+        radius_range = [0.02, 0.05] # [m]
         # height_range = [0.05, 0.07]
         height_range = [0.15, 0.2]
         # height_range = [0.05, 0.08]
         dims_range = [[0.03, 0.05], [0.15, 0.2], [0.03, 0.05]] # [[], [0.15, 0.2], []]
         
         # Ellipsoid dimensions (Short logic task)
-        ellipsoid_dims_range = [[0.03, 0.06], [0.03, 0.06], [0.03, 0.06]] # [min, max] for x, y, z (diameters)
+        ellipsoid_dims_range = [[0.03, 0.10], [0.03, 0.10], [0.03, 0.10]] # [min, max] for x, y, z (diameters)
         
         # Box dimensions for Place task (Large Cuboid)
         # box_dims_range = [[0.03, 0.3], [0.03, 0.3], [0.2, 0.35]] # [min, max] for x, y, z
@@ -31,7 +31,7 @@ class TargetCfg:
     class perception:
         num_sample_points = 1500
         use_geometric_weight = True
-        alpha_range = [0.5, 1.5] # Sigma points scaling factor range
+        alpha_range = [1.0, 1.5] # Sigma points scaling factor range
         debug_timer = False
         debug_info = False
 

@@ -75,7 +75,7 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
             num_observations = num_props * history_len
             num_privileged_obs = num_props * history_len + num_priv
         else:
-            num_observations = num_props * history_len + num_priv
+            num_observations = num_props * history_len + num_priv + num_nav_commands * nav_history_len
             num_privileged_obs = None
 
         num_envs = 2048
@@ -126,7 +126,7 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
         nav_refresh_steps_range = [1, 2] 
         # invalid commands
         enable_invalid_cmds = True
-        enable_out_of_view_drift = False # if True, add random walk drift when out of view
+        enable_out_of_view_drift = True # if True, add random walk drift when out of view
         drift_scale = 0.02 # scale of the random walk drift per step
         max_drift = 0.1 # [m] maximum drift distance
         dummy_sigma_offset = 0.05 # [m] maximum offset for dummy sigma points when perception is invalid
@@ -350,6 +350,7 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
             backup = -4
             sequential_reaching = 0.4
             place_right_pitch = 0.3
+            invalid_stand_still = 0.0
 
         soft_dof_pos_limit = 0.95
         base_height_target = 0.25
@@ -361,8 +362,8 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
         soft_torque_limit = 0.85
         max_contact_force = 100.
         tracking_sigma = 0.1
-        weight_track_pick_pos = 2.0
-        weight_track_place_pos = 5.0
+        weight_track_pick_pos = 3.0
+        weight_track_place_pos = 3.0
         rot_track_sigma = 0.02
         pos_track_sigma = 0.02
         soft_sigma = 0.04
@@ -387,15 +388,30 @@ class Go2NavFlatCfgPPO( LeggedRobotCfgPPO ):
             policy_class_name = 'ActorCriticRecurrent'
         else:
             # policy_class_name = 'ActorCriticEncoder' # good performance
-            # policy_class_name = 'ActorCriticTCN'
+            policy_class_name = 'ActorCriticTCN'
             # policy_class_name = "ActorCriticRecurrentEncoder" # bad performance
-            policy_class_name = "ActorCriticRecurrentLight" # bad performance
+            # policy_class_name = "ActorCriticRecurrentLight" # bad performance
+            # policy_class_name = "ActorCriticChunk" 
         algorithm_class_name = 'PPO'
+        # algorithm_class_name = 'PPOChunk'
 
     class policy( LeggedRobotCfgPPO.policy ):
         actor_hidden_dims = [512, 256, 128]
         critic_hidden_dims = [512, 256, 128]
         rnn_type = 'gru'
+        chunk_size = 10  # Number of steps to process in a chunk
+        
+        # Optimized TCN params for speed
+        # tcn_channels = [32, 32, 32] # Default was [64, 64, 64, 64]
+        # tcn_kernel_size = 3 # Default was 5
+
+        # Optimized TCN params for speed
+        tcn_channels = [32, 32, 32] 
+        tcn_kernel_size = 5 
+        tcn_dropout = 0.1
+
+        # init_noise_std = 0.3
+
 
         # actor_hidden_dims = [256, 128, 64]
         # critic_hidden_dims = [256, 128, 64]

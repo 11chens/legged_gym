@@ -44,7 +44,7 @@ from typing import Tuple, Dict
 from legged_gym import LEGGED_GYM_ROOT_DIR
 from legged_gym.envs.base.base_task import BaseTask
 from legged_gym.utils.terrain import Terrain
-from legged_gym.utils.math import quat_apply_yaw, wrap_to_pi, torch_rand_sqrt_float, yaw_quat, cart2polar, quat_to_rot_matrix
+from legged_gym.utils.torch_math import quat_apply_yaw, wrap_to_pi, torch_rand_sqrt_float, yaw_quat, cart2polar, quat_to_rot_matrix
 from legged_gym.utils.helpers import class_to_dict
 from legged_gym.envs.go2.go2_nav_config import Go2NavFlatCfg
 from .legged_robot import LeggedRobot
@@ -242,7 +242,7 @@ class LeggedRobotNav(LeggedRobot):
         self.place_offset = torch.zeros((self.num_envs, 1), device=self.device)
 
         self.nav_actions_buffer = torch.zeros(self.num_envs, self.cfg.env.history_len, self.cfg.env.num_nav_actions, dtype=torch.float, device=self.device, requires_grad=False)
-        self.nav_commands_buffer = torch.zeros(self.num_envs, self.cfg.env.nav_history_len*2, self.cfg.commands.num_nav_commands, dtype=torch.float, device=self.device, requires_grad=False)
+        self.nav_commands_buffer = torch.zeros(self.num_envs, self.cfg.env.nav_history_len, self.cfg.commands.num_nav_commands, dtype=torch.float, device=self.device, requires_grad=False)
         self.delay_nav_commands_hist_buffer = torch.zeros(self.num_envs, self.cfg.env.nav_history_len, self.cfg.commands.num_nav_commands, dtype=torch.float, device=self.device, requires_grad=False)
         self.delay_nav_commands = torch.zeros(self.num_envs, self.cfg.commands.num_nav_commands, dtype=torch.float, device=self.device, requires_grad=False)
         self.nav_clip_min = torch.tensor([self.cfg.commands.ranges.limit_vx[0], self.cfg.commands.ranges.limit_vy[0], self.cfg.commands.ranges.limit_vyaw[0], self.cfg.commands.ranges.limit_pitch[0]], dtype=torch.float, device=self.device, requires_grad=False)
@@ -302,6 +302,7 @@ class LeggedRobotNav(LeggedRobot):
         # sample alpha from [0, 1], self.alpha is the smoothing factor, shape: (num_envs, 1)
         # in this way, we can reduce sudden changes in joints (alpha=0: no smoothing, but motors will respond immediately in reality)
         self.nav_actions = self.alpha * nav_actions + (1 - self.alpha) * self.nav_actions
+        # self.nav_actions = nav_actions
         return self.nav_actions
 
     def _get_loco_obs_noise_scale_vec(self):
@@ -1779,12 +1780,13 @@ class LeggedRobotNav(LeggedRobot):
         # 3. Update nav_commands
         self.nav_commands = self.sigma_points_obs[:, :self.cfg.env.num_nav_commands//3].reshape(self.num_envs, -1)  # [N, D]
 
-        self.nav_commands_buffer = torch.where(
-            (self.episode_length_buf <= 1)[:, None, None],
-            torch.stack([self.nav_commands] * self.nav_commands_buffer.shape[1], dim=1),
+        env_ids = (self.episode_length_buf % 10 == 0).nonzero(as_tuple=False).flatten()
+        self.nav_commands_buffer[env_ids] = torch.where(
+            (self.episode_length_buf[env_ids] <= 1)[:, None, None],
+            torch.stack([self.nav_commands[env_ids]] * self.nav_commands_buffer[env_ids].shape[1], dim=1),
             torch.cat([
-                self.nav_commands_buffer[:, 1:],
-                self.nav_commands.unsqueeze(1)
+                self.nav_commands_buffer[env_ids, 1:],
+                self.nav_commands[env_ids].unsqueeze(1)
             ], dim=1)
         )  
 
@@ -2045,10 +2047,14 @@ class LeggedRobotNav(LeggedRobot):
                 self.current_perceived_obs.unsqueeze(1)
             ], dim=1)
         
-        # 8. priv + obs
-        self.obs_buf = torch.cat([self.task_id, \
-                                self.all_valid_sigma_points, \
-                                self.obs_hist_buffer.view(self.num_envs, -1)], dim=-1)
+        # 8. priv + nav_cmd_hist + obs_hist
+        self.obs_buf = torch.cat([
+                                # ------- privileged information start -------
+                                self.task_id, # dim 1
+                                self.all_valid_sigma_points, # dim 21
+                                # ------- privileged information end -------
+                                self.nav_commands_buffer.view(self.num_envs, -1), # dim 21*50, TCN handling 
+                                self.obs_hist_buffer.view(self.num_envs, -1)], dim=-1) # dim 35*5
 
     # ------------- Cameras -------------
     def attach_camera(self, env_handle, actor_handle):
@@ -2326,12 +2332,15 @@ class LeggedRobotNav(LeggedRobot):
 
         # _rew_pick = self.is_pick * r_rot * (1 + self.cfg.rewards.weight_track_pick_pos * r_pos_pick)
 
-        _rew_short_pick = self.is_pick * (~self.obj_is_too_long) * r_rot * (1.0 + 2.0 * r_pos_short_pick)
-        _rew_long_pick = self.is_pick * (self.obj_is_too_long) * r_rot * (2.0 + self.cfg.rewards.weight_track_pick_pos * r_pos_long_pick)
+        _rew_short_pick = self.is_pick * (~self.obj_is_too_long) * r_rot * (1.0 + 1.0 * self.cfg.rewards.weight_track_pick_pos)
+        _rew_long_pick = self.is_pick * (self.obj_is_too_long) * r_rot * (1.0 + self.cfg.rewards.weight_track_pick_pos * r_pos_long_pick)
         _rew_pick = _rew_short_pick + _rew_long_pick
         _rew_place = self.is_place * r_rot * (0.5 + self.cfg.rewards.weight_track_place_pos * r_pos_place)
-
-        return self.is_success_state.float() * (_rew_pick + _rew_place) * r_vel
+        no_move = torch.logical_and(
+            torch.norm(self.base_lin_vel, dim=1) < 0.1,
+            torch.norm(self.base_ang_vel, dim=1) < 0.1
+        )
+        return self.is_success_state.float() * (_rew_pick + _rew_place) * r_vel * (1 + 0.0 * no_move.float())
 
     def _reward_backup(self):
         """ Reward for backing up when too close to the object
@@ -2386,12 +2395,11 @@ class LeggedRobotNav(LeggedRobot):
         r_pos_place = torch.exp(-self.pos_error_sq_place / self.cfg.rewards.soft_sigma) # sigma ~ 0.14 m
 
         # 3. Goal Reaching Reward (Pulls along line to Optimal)
-        _rew_short_pick = self.is_pick * (~self.obj_is_too_long) * r_path * r_rot * (1.0 + 2.0 * r_pos_short_pick)
-        _rew_long_pick = self.is_pick * (self.obj_is_too_long) * r_path * r_rot * (2.0 + self.cfg.rewards.weight_track_pick_pos * r_pos_long_pick)
+        _rew_short_pick = self.is_pick * (~self.obj_is_too_long) * r_path * r_rot * (1.0 + self.cfg.rewards.weight_track_pick_pos * r_pos_short_pick)
+        _rew_long_pick = self.is_pick * (self.obj_is_too_long) * r_path * r_rot * (1.0 + self.cfg.rewards.weight_track_pick_pos * r_pos_long_pick)
         _rew_pick = _rew_short_pick + _rew_long_pick
         _rew_place = self.is_place * r_path * r_rot * (0.5 + self.cfg.rewards.weight_track_place_pos * r_pos_place)
-
-        return _rew_pick + _rew_place
+        return (_rew_pick + _rew_place)
 
     def _reward_place_right_pitch(self):
         """ Reward for having a proper pitch angle when placing
@@ -2403,3 +2411,9 @@ class LeggedRobotNav(LeggedRobot):
         should_pitch = torch.logical_and(self.d_goal_err_x < 0.10, self.d_goal_err_y < 0.05)
         return self.is_place * ( 2 * (should_pitch) * r_pitch - \
                                  2 * self.far_target.float() * lookup_mag )
+
+    def _reward_invalid_stand_still(self):
+        """ Reward for standing still when all sigma points are invalid
+        """
+        pos_error_sq = torch.square(self.d_goal_err_x) + torch.square(self.d_goal_err_y)
+        return (~self.is_valid) * pos_error_sq * (self.timer.squeeze(dim=1) > 0.2).float()
