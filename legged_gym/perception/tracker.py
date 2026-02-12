@@ -2,7 +2,7 @@ import time
 from .surface_geometry import SurfaceShape, Sphere, Cuboid, Cylinder, Box, Ellipsoid
 from .perception_utils import compute_visibility_weights, compute_occlusion_mask, project_points, compute_weighted_pca, generate_sigma_points, generate_structured_noisy_sigma_points
 import torch
-from isaacgym.torch_utils import quat_apply
+from isaacgym.torch_utils import quat_apply, quat_rotate_inverse
 
 class PCATargetTracker:
     def __init__(self, shape_type: str, shape_params: torch.Tensor, num_envs: int, device: str, num_sample_points: int = 1000, local_points=None, local_normals=None, object_dims=None):
@@ -355,3 +355,73 @@ class PCATargetTracker:
             print(f"  Total:      {(t5-t0)*1000:.3f} ms")
         
         return sigma_points_2d, mean_2d, eigvals_2d, eigvecs_2d, weights, points_2d, sigma_points_3d, is_valid
+
+    def transform_sigma_points_to_robot(self, sigma_points_3d, base_pos, base_quat, 
+                                          cam_translation, cam_rotation, 
+                                          camera_params):
+        """
+        Transforms sigma points from World Frame to Robot Frames (Base, Camera, Image).
+        
+        Args:
+            sigma_points_3d (Tensor): [N, M, 3] Sigma points in World Frame.
+            base_pos (Tensor): [N, 3] Robot base position.
+            base_quat (Tensor): [N, 4] Robot base orientation.
+            cam_translation (Tensor): [N, 3] Camera translation in Base Frame.
+            cam_rotation (Tensor): [N, 3, 3] Camera rotation matrix in Base Frame.
+            camera_params (dict): Camera intrinsics.
+            
+        Returns:
+            sigma_base (Tensor): [N, M, 3] in Base Frame.
+            sigma_camera (Tensor): [N, M, 3] in Camera Frame.
+            sigma_image (Tensor): [N, M, 2] in Image Plane. 
+        """
+        num_envs = sigma_points_3d.shape[0]
+        num_points = sigma_points_3d.shape[1]
+        
+        # Unpack camera params
+        cam_fx = camera_params['fx']
+        cam_fy = camera_params['fy']
+        cam_cx = camera_params['cx']
+        cam_cy = camera_params['cy']
+        
+        # 1. World -> Base
+        delta = sigma_points_3d - base_pos.unsqueeze(1) # [N, M, 3]
+        
+        # quat_rotate_inverse expects [N, 4] and [N, 3]
+        # We need to flatten our sigma points to apply the rotation
+        # Expand quat to match num_points
+        base_quat_expanded = base_quat.unsqueeze(1).expand(-1, num_points, -1).reshape(-1, 4)
+        delta_flat = delta.reshape(-1, 3)
+        
+        sigma_points_base_flat = quat_rotate_inverse(base_quat_expanded, delta_flat)
+        sigma_points_base = sigma_points_base_flat.view(num_envs, num_points, 3)
+        
+        # 2. Base -> Camera
+        # Camera Frame: Optical Frame (Right-Down-Forward)
+        # Position relative to camera optical center
+        delta_cam = sigma_points_base - cam_translation.unsqueeze(1) # [N, M, 3]
+        
+        # Rotate into camera frame
+        # cam_rotation is [N, 3, 3]
+        # delta_cam is [N, M, 3]
+        # We want res = R * delta^T  => [N, 3, 3] * [N, 3, M] = [N, 3, M]
+        res = torch.bmm(cam_rotation, delta_cam.transpose(1, 2))
+        sigma_points_camera = res.transpose(1, 2) # [N, M, 3]
+        
+        # 3. Camera -> Image
+        x = sigma_points_camera[:, :, 0]
+        y = sigma_points_camera[:, :, 1]
+        z = sigma_points_camera[:, :, 2]
+        
+        # Avoid div by zero
+        z_safe = torch.where(z < 1e-5, torch.ones_like(z) * 1e-5, z)
+        
+        # Project
+        # Note: cam_fx, cam_fy, cam_cx, cam_cy are [N, 1]
+        u = (x / z_safe) * cam_fx + cam_cx
+        v = (y / z_safe) * cam_fy + cam_cy
+        
+        sigma_points_image = torch.stack([u, v], dim=-1)
+        
+        return sigma_points_base, sigma_points_camera, sigma_points_image
+

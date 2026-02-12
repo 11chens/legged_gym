@@ -70,12 +70,11 @@ def play(args):
     env: LeggedRobotNav
     env_cfg: Go2NavFlatCfg
 
-    # args.load_run = '02_11_21-08-28_'
-    # args.checkpoint = 1000
+    # args.load_run = '02_12_22-29-58_'
+    # args.checkpoint = 400
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     # override some parameters for testing
     env_cfg.env.num_envs = 1
-    env_cfg.env.sigma_frame = "camera" # "base", "camera", "image"
 
     env_cfg.debug_viz = False
     env_cfg.terrain.num_rows = 1
@@ -120,8 +119,8 @@ def play(args):
     env_cfg.target.init.vertical_prob = 0.0
     env_cfg.target.perception.add_pre_pca_noise = True
     env_cfg.target.perception.alpha_range = [1.0, 1.0] # Sigma points scaling factor range
-    env_cfg.target.shape.types = ["ycb"]
-    # env_cfg.target.shape.types = ["sphere"]
+    # env_cfg.target.shape.types = ["ycb"]
+    env_cfg.target.shape.types = ["sphere"]
     # env_cfg.target.shape.types = ["box"]
     # env_cfg.target.shape.types = ["cuboid"]
     # env_cfg.target.shape.dims_range = [[0.05, 0.10], [0.05, 0.10], [0.05, 0.10]] # longer pick cuboid

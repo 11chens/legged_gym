@@ -32,18 +32,8 @@ from legged_gym.envs.base.legged_robot_config import LeggedRobotCfgPPO
 from legged_gym.envs.base.legged_robot_nav_config import LeggedRobotNavCfg
 from legged_gym.envs.base.target_config import TargetCfg
 
-USE_3D_SIGMA_POINTS = True # Toggle between 3D (7 points) and 2D (5 points)
-
-if USE_3D_SIGMA_POINTS:
-    NUM_SIGMA_POINTS = 7 # 2*3 + 1
-    NUM_NAV_COMMANDS = 21 # 7 points * 3 coords (x, y, z) in Camera Frame
-else:
-    NUM_SIGMA_POINTS = 5 # 2*2 + 1
-    NUM_NAV_COMMANDS = 15 # 5 points * 3 coords (u, v, z) in Image Plane
-
-# NUM_NAV_COMMANDS = (2 * 1 + 1) * 3 # only main axis (2D)
-# NUM_NAV_COMMANDS = (2 * 2 + 1) * 3 # two axis points (3D)
-NUM_NAV_COMMANDS = (2 * 3 + 1) * 3 # all sigma points (3D)
+NUM_SIGMA_POINTS = (2 * 3 + 1)
+NUM_NAV_COMMANDS = NUM_SIGMA_POINTS * 3 # all sigma points (3D)
 EPISODE_LENGTH_S = 6
 
 class Go2NavFlatCfg( LeggedRobotNavCfg ):
@@ -58,8 +48,6 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
         loco_history_len = 5
 
     class env(LeggedRobotNavCfg.env):
-        use_3d_sigma_points = USE_3D_SIGMA_POINTS
-        sigma_frame = "camera" # "base", "camera", "image"
         num_position = 3 # x, y, z
         num_nav_actions = 4 # vx, vy, vyaw, pitch
         nav_history_len = 10
@@ -154,7 +142,7 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
             force_look_upwards = True
             enable_success_feeding = True # If True, use success  feeding mechanism
             feeding_prob = 0.33 # Probability of feeding when using success feeding
-            force_lookup_prob = 0.2 # new----------------------Probability of forcing a look-up when adjusting object pose
+            force_lookup_prob = 0.2 # Probability of forcing a look-up when adjusting object pose
             min_steps = 100 # Minimum steps before resampling on the way
             look_up_duration = 0.5 # [s] Duration to maintain look-up pitch
             resample_interval_steps = 150 # Resample every N steps
@@ -212,13 +200,13 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
 
         class extrinsics: # Extrinsics parameters
             #  ================= fixed extrinsics =================
-            translation = [0.305, 0.017, 0.138]  # Translation: forward, left, upward
-            angles = [0.0, 35.0, 0.0]  # Euler angles: yaw, pitch, roll
+            translation = [0.305, 0.017, 0.128]  # Translation: forward, left, upward
+            angles = [0.0, 37.0, 0.0]  # Euler angles: yaw, pitch, roll
             
             #  ================= random extrinsics =================
             # Randomization ranges around the fixed extrinsics
             yaw_range = [-0.5, 0.5]   # [degree]
-            pitch_range = [-3.0, 3.0] # [degree]
+            pitch_range = [-2.0, 2.0] # [degree]
             roll_range = [-0.5, 0.5]  # [degree]
 
             dx_range = [-0.02, 0.02]   # [m]

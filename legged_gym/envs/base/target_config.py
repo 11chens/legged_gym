@@ -53,7 +53,7 @@ class TargetCfg:
         # Randomization ranges
         pos_x_range = [1.0, 3.0] # Distance from robot
         pos_y_range = [-1.0, 1.0]
-        place_prob = 0.5  # Probability of Place task
+        place_prob = 0.4  # Probability of Place task
         vertical_prob = 0.01  # Probability of vertical placement, we encourage horizontal placement, to help robot learn short-end grasping.
         
         # Orientation randomization
