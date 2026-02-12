@@ -87,7 +87,7 @@ class PCATargetTracker:
         elif shape_type == 'cuboid' or shape_type == 'box':
             # shape_params: [N, 3] (dims)
             dims[:] = shape_params
-        elif shape_type == 'cylinder':
+        elif shape_type == 'cylinder' or shape_type == 'cylinder_well':
             # shape_params: [N, 2] (radius, height)
             d = 2 * shape_params[:, 0]
             h = shape_params[:, 1]

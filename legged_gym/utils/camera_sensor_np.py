@@ -18,8 +18,8 @@ class RealsenseConfig:
         D = [0.0, 0.0, 0.0, 0.0, 0.0]
 
     class extrinsics:  # Camera extrinsic parameters
-        translation = [0.305, 0.017, 0.128]  # Translation: forward, left, upward
-        angles = [0.0, 30.0, 0.0]  # Euler angles: yaw, pitch, roll
+        translation = [0.305, 0.017, 0.138]  # Translation: forward, left, upward
+        angles = [0.0, 33.0, 0.0]  # Euler angles: yaw, pitch, roll
 
 
 class CameraTrans:

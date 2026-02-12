@@ -36,7 +36,7 @@ def process_obj(obj_path, save_path, num_points=2048):
     center = aabb.get_center()
 
     # Extract data
-    points = np.asarray(pcd.points)
+    points = np.asarray(pcd.points) - center # Center the points
     normals = np.asarray(pcd.normals)
     
     # User's requested format

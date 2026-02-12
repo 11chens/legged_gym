@@ -305,3 +305,82 @@ class Cylinder(SurfaceShape):
             normals[mask_caps] = norms
             
         return points, normals
+
+
+class CylinderWell(SurfaceShape):
+    """ Hollow Cylinder (Well, similar to Box) with 4 surfaces: Outer Side, Inner Side, Outer Bottom, Inner Bottom. """
+    def sample_surface(self, num_points, num_envs, params):
+        # params: [radius, height]
+        radius = params[:, 0]
+        height = params[:, 1]
+        
+        pts_per_surf = num_points // 4
+        if pts_per_surf < 1: pts_per_surf = 1
+        
+        # We will generate 4 * pts_per_surf points
+        total_gen = pts_per_surf * 4
+        points = torch.zeros((num_envs, total_gen, 3), device=self.device)
+        normals = torch.zeros((num_envs, total_gen, 3), device=self.device)
+        
+        curr = 0
+        def fill_cyl_side(start_idx, r_val, h_val, normal_sign):
+            end_idx = start_idx + pts_per_surf
+            k = pts_per_surf
+            
+            theta = torch.rand((num_envs, k), device=self.device) * 2 * np.pi
+            z = (torch.rand((num_envs, k), device=self.device) - 0.5) * h_val.view(-1, 1).expand(-1, k)
+            
+            r = r_val.view(-1, 1).expand(-1, k)
+            x = r * torch.cos(theta)
+            y = r * torch.sin(theta)
+            
+            p_batch = torch.stack([x, y, z], dim=-1)
+            
+            # Normal
+            n_x = torch.cos(theta) * normal_sign
+            n_y = torch.sin(theta) * normal_sign
+            n_z = torch.zeros_like(n_x)
+            n_batch = torch.stack([n_x, n_y, n_z], dim=-1)
+            
+            points[:, start_idx:end_idx] = p_batch
+            normals[:, start_idx:end_idx] = n_batch
+            return end_idx
+        
+        def fill_cyl_bottom(start_idx, r_val, h_val, normal_z):
+            end_idx = start_idx + pts_per_surf
+            k = pts_per_surf
+            
+            theta = torch.rand((num_envs, k), device=self.device) * 2 * np.pi
+            u = torch.rand((num_envs, k), device=self.device)
+            r = r_val.view(-1, 1).expand(-1, k) * torch.sqrt(u)
+            
+            x = r * torch.cos(theta)
+            y = r * torch.sin(theta)
+            z = -0.5 * h_val.view(-1, 1).expand(-1, k)
+            
+            p_batch = torch.stack([x, y, z], dim=-1)
+            
+            n_x = torch.zeros_like(x)
+            n_y = torch.zeros_like(y)
+            n_z = torch.ones_like(z) * normal_z
+            n_batch = torch.stack([n_x, n_y, n_z], dim=-1)
+
+            points[:, start_idx:end_idx] = p_batch
+            normals[:, start_idx:end_idx] = n_batch
+            return end_idx
+
+        curr = fill_cyl_side(curr, radius, height, 1.0) # Outer
+        curr = fill_cyl_side(curr, radius, height, -1.0) # Inner
+        curr = fill_cyl_bottom(curr, radius, height, -1.0) # Outer Bottom (facing down)
+        curr = fill_cyl_bottom(curr, radius, height, 1.0) # Inner Bottom (facing up/inside)
+
+        # Pad or Clip
+        if total_gen < num_points:
+            padding = num_points - total_gen
+            points = torch.cat([points, points[:, :padding, :]], dim=1)
+            normals = torch.cat([normals, normals[:, :padding, :]], dim=1)
+        else:
+            points = points[:, :num_points, :]
+            normals = normals[:, :num_points, :]
+            
+        return points, normals

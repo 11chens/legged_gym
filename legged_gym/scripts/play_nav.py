@@ -70,7 +70,7 @@ def play(args):
     env: LeggedRobotNav
     env_cfg: Go2NavFlatCfg
 
-    # args.load_run = '02_05_01-45-34_'
+    # args.load_run = '02_11_21-08-28_'
     # args.checkpoint = 1000
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     # override some parameters for testing
@@ -105,7 +105,7 @@ def play(args):
     env_cfg.commands.enable_out_of_view_drift = True # if True, add random walk drift when out of view
     env_cfg.commands.resample.adjust_obj_pose = True
     env_cfg.commands.resample.enable_success_feeding = True # If True, use success  feeding mechanism
-    env_cfg.commands.resample.feeding_prob = 0.3 # If True, use success  feeding mechanism
+    env_cfg.commands.resample.feeding_prob = 0.33 # If True, use success  feeding mechanism
     env_cfg.commands.resample.force_look_upwards = False
     env_cfg.commands.resample.ranges.min_dist = 2.0
     env_cfg.commands.resample.ranges.max_dist = 3.0
@@ -120,7 +120,7 @@ def play(args):
     env_cfg.target.init.vertical_prob = 0.0
     env_cfg.target.perception.add_pre_pca_noise = True
     env_cfg.target.perception.alpha_range = [1.0, 1.0] # Sigma points scaling factor range
-    # env_cfg.target.shape.types = ["ellipsoid"]
+    env_cfg.target.shape.types = ["ycb"]
     # env_cfg.target.shape.types = ["sphere"]
     # env_cfg.target.shape.types = ["box"]
     # env_cfg.target.shape.types = ["cuboid"]
@@ -328,9 +328,9 @@ def play(args):
 
 
 
-        base_x = env.sigma_points_base[0, 0, 0].item()
-        base_y = env.sigma_points_base[0, 0, 1].item()
-        base_z = env.sigma_points_base[0, 0, 2].item()
+        main_x = env.sigma_points_camera[0, 0, 0].item()
+        main_y = env.sigma_points_camera[0, 0, 1].item()
+        main_z = env.sigma_points_camera[0, 0, 2].item()
 
         vx = env.base_lin_vel[0, 0]
         vy = env.base_lin_vel[0, 1]
@@ -338,6 +338,8 @@ def play(args):
         pitch = env.euler_rpy[0, 1]
 
         distance = env.distance[0].item()
+
+        print(f"main sigma points: ({main_x}, {main_y}, {main_z})")
 
         # print(f"vel: ({vx:.2f}, {vy:.2f}, {vyaw:.2f}, {pitch:.2f})")
         # print(f"Command: (sig_x: {sig_x:.2f}, sig_y: {sig_y:.2f}, sig_z: {sig_z:.2f})")

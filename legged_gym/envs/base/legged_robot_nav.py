@@ -50,7 +50,8 @@ from legged_gym.envs.go2.go2_nav_config import Go2NavFlatCfg
 from .legged_robot import LeggedRobot
 from legged_gym.utils.camera_sensor import CameraSensor
 from legged_gym.perception.tracker import PCATargetTracker
-from legged_gym.perception.surface_geometry import Cylinder, Cuboid, Sphere, Box, Ellipsoid
+from legged_gym.perception.surface_geometry import Cylinder, Cuboid, Sphere, Box, Ellipsoid, CylinderWell
+from legged_gym.perception.ycb_geometry import YCBManager, YCBGeometry
 from legged_gym.utils.visualization import VisualizationUtils
 
 class LeggedRobotNav(LeggedRobot):
@@ -74,16 +75,26 @@ class LeggedRobotNav(LeggedRobot):
         # Initialize Perception Tracker
         target_cfg = self.cfg.target
         
+        # Initialize YCB Manager
+        self.ycb_manager = YCBManager(
+            obj_root="/home/robot/project/legged_gym/obj_set", # Make this configurable if possible or use default
+            device=self.device,
+            max_cache_points=target_cfg.perception.num_sample_points
+        )
+
         # Pre-instantiate shapes
         self.shapes = {
             "cylinder": Cylinder(self.device),
             "cuboid": Cuboid(self.device),
             "sphere": Sphere(self.device),
             "box": Box(self.device),
-            "ellipsoid": Ellipsoid(self.device)
+            "ellipsoid": Ellipsoid(self.device),
+            "ycb": YCBGeometry(self.ycb_manager),
+            "cylinder_well": CylinderWell(self.device)
         }
         
         self.object_dims = torch.zeros(self.num_envs, 3, device=self.device)
+        self.ycb_indices = torch.zeros(self.num_envs, dtype=torch.long, device=self.device) # Store assigned YCB IDs
         self.local_points = torch.zeros(self.num_envs, target_cfg.perception.num_sample_points, 3, device=self.device)
         self.local_normals = torch.zeros(self.num_envs, target_cfg.perception.num_sample_points, 3, device=self.device)
         
@@ -378,6 +389,19 @@ class LeggedRobotNav(LeggedRobot):
         current_success_ratio = torch.mean(self.is_success_state.float())
         replay_cfg = self.cfg.commands.resample
         
+        # --- Adaptive Drift Curriculum ---
+        if self.cfg.commands.enable_drift_curriculum:
+            # Map success ratio [0, threshold] -> [min, max]
+            threshold = self.cfg.commands.drift_curriculum_threshold
+            progress = torch.clamp(current_success_ratio / threshold, 0.0, 1.0)
+            
+            # Linear interpolation
+            d_scale_min, d_scale_max = self.cfg.commands.drift_scale_range
+            m_drift_min, m_drift_max = self.cfg.commands.max_drift_range
+            
+            self.cfg.commands.drift_scale = d_scale_min + (d_scale_max - d_scale_min) * progress.item()
+            self.cfg.commands.max_drift = m_drift_min + (m_drift_max - m_drift_min) * progress.item()
+
         # Conditions for replay:
         # 1. success_ratio > threshold
         # 2. was failure in last episode
@@ -435,6 +459,9 @@ class LeggedRobotNav(LeggedRobot):
         dummy_offset_scale = self.cfg.commands.dummy_sigma_offset
         self.dummy_sigma_points_offset[env_ids] = torch_rand_float(-dummy_offset_scale, dummy_offset_scale, (len(env_ids), 3), device=self.device)
         
+        if hasattr(self, 'filter_reset_mask'):
+            self.filter_reset_mask[env_ids] = True
+
         place_offset_scale = self.cfg.commands.place_offset_value
         place_offset_error_margin = self.cfg.commands.place_offset_error_margin
         self.place_offset[env_ids] = torch_rand_float(place_offset_scale - place_offset_error_margin, place_offset_scale + place_offset_error_margin, (len(env_ids), 1), device=self.device)
@@ -636,12 +663,14 @@ class LeggedRobotNav(LeggedRobot):
             2. Orientation Alignment < Threshold
         """
         # 1. Distance Check (Close to Optimal Grasp Pose)
-        is_at_target = torch.logical_and(self.d_goal_err_x < 0.05, self.d_goal_err_y < 0.03) # 3cm tolerance
         self.near_target = torch.logical_and(self.d_goal_err_x < 0.03, self.d_goal_err_y < 0.03)
         self.far_target = torch.logical_or(self.d_goal_err_x >= 0.2, self.d_goal_err_y > 0.05)
 
         # 2. Orientation Alignment
         # is_aligned = self.yaw_err < 0.1 # ~5.7 degrees tolerance
+        is_at_target = self.is_pick * torch.logical_and(self.d_goal_err_x < 0.05, self.d_goal_err_y < 0.03) + \
+                         self.is_place * torch.logical_and(self.d_goal_err_x < 0.07, self.d_goal_err_y < 0.07)
+        
         is_aligned = self.is_pick * (self.yaw_err < 0.1) + \
                         self.is_place * ( (self.yaw_err < 0.1) & (self.pitch_err < 0.15) )
         self.is_success_state = is_at_target & is_aligned
@@ -773,7 +802,7 @@ class LeggedRobotNav(LeggedRobot):
         # Radius estimate (max dim / 2)
         radius = torch.max(self.object_dims[ids_place], dim=1)[0].unsqueeze(-1) / 2.0
         
-        dist_fwd = torch_rand_float(-0.1, 0.2, (n_place, 1), device=self.device)
+        dist_fwd = torch_rand_float(-0.1, 0.4, (n_place, 1), device=self.device)
         dist_fwd = dist_fwd + radius
         dist_lat = torch_rand_float(self.dist_lat_range[0], self.dist_lat_range[1], (n_place, 1), device=self.device)
             
@@ -1088,7 +1117,15 @@ class LeggedRobotNav(LeggedRobot):
         dims_xy = self.object_dims[:, :2]
         radius_xy = torch.min(dims_xy, dim=1)[0].unsqueeze(-1) / 2.0
         # opt_pos = self.object_pos - axis_inward * (radius_xy + self.cfg.env.grasp_offset_place)
-        opt_pos = self.object_pos - axis_inward * (radius_xy / 4.0)  # Move to edge
+        
+        lower = radius_xy / 3.0
+        upper = radius_xy / 4.0
+        offset_sample = lower + (upper - lower) * torch.rand_like(lower)
+
+        offset_sample = 0.0 # new ------------------------
+
+        opt_pos = self.object_pos - axis_inward * offset_sample  # Move to edge
+        # opt_pos = self.object_pos - axis_inward * 0.0
         # opt_pos = self.object_pos.clone()
         opt_pos[:, 2] = self.object_pos[:, 2] + self.object_dims[:, 2] / 2.0 + clearance
         opt_dir = axis_inward
@@ -1098,9 +1135,9 @@ class LeggedRobotNav(LeggedRobot):
         d_xy = torch.norm(vec_base_to_target[:, :2], dim=1)
         d_z = vec_base_to_target[:, 2]
         pitch_dynamic = torch.atan2(-d_z, d_xy)
-        # pitch_fixed = torch.ones_like(d_xy) * (self.cfg.commands.place_pitch_target)
-        self.pitch_target = pitch_dynamic
-        # self.pitch_target = pitch_fixed
+        pitch_fixed = torch.ones_like(d_xy) * (self.cfg.commands.place_pitch_target)
+        # self.pitch_target = pitch_dynamic
+        self.pitch_target = pitch_fixed
         # 3. Hint Pose (same XY logic, but at surface+clearance)
         hint_pos = self.env_start_pos + axis_inward * hint_dist_from_start
         hint_pos[:, 2] = self.object_pos[:, 2] + self.object_dims[:, 2] / 2.0 + clearance
@@ -1152,13 +1189,13 @@ class LeggedRobotNav(LeggedRobot):
         self.d_goal_err_y = torch.abs(self.gripper_world[:, 1] - self.optimal_grasp_pos[:, 1])
         self.d_goal_err_z = torch.abs(self.gripper_world[:, 2] - self.optimal_grasp_pos[:, 2])
         self.pos_error_sq = w_x * torch.square(self.d_goal_err_x) + w_y * torch.square(self.d_goal_err_y) + w_z * torch.square(self.d_goal_err_z)
-        self.pos_error_sq_place = 2 * torch.square(self.d_goal_err_x) + 0.5 * torch.square(self.d_goal_err_y) + 0.1 * torch.square(self.d_goal_err_z)
+        self.pos_error_sq_place = 2 * torch.square(self.d_goal_err_x) + 0.2 * torch.square(self.d_goal_err_y) + 0.1 * torch.square(self.d_goal_err_z)
         
         # Orientation Error
         roll_r, pitch_r, yaw_r = get_euler_xyz(self.base_quat)
         roll_t, pitch_t, yaw_t = get_euler_xyz(self.optimal_grasp_quat)
         # pitch_t_clipped = torch.clamp(pitch_t, min=self.nav_clip_min[-1], max=self.nav_clip_max[-1])
-        pitch_t_clipped = torch.clamp(wrap_to_pi(pitch_t), min=-0.2, max=0.40)  # Clip between -24 to 24 degrees
+        pitch_t_clipped = torch.clamp(wrap_to_pi(pitch_t), min=-0.25, max=0.40)  # Clip between -24 to 24 degrees
         pitch_r_warped = wrap_to_pi(pitch_r)
 
         self.roll_err = torch.abs(wrap_to_pi(roll_r - roll_t))
@@ -1245,20 +1282,31 @@ class LeggedRobotNav(LeggedRobot):
         if len(env_ids) == 0:
             return
 
-        target_cfg = self.cfg.target
+        # 1. Task Sampling
+        self._sample_task_types(env_ids)
+
+        # 2. Shape Type Selection
+        self._select_shape_types(env_ids)
         
-        # --- Task Sampling ---
-        # 0: Pick, 1: Place
+        # 3. Parameter Generation
+        self._sample_shape_parameters(env_ids)
+            
+        # 4. Update Object State Flags
+        self._update_object_state_flags(env_ids)
+
+    def _sample_task_types(self, env_ids):
+        """ Determine if the task is Pick or Place for each environment """
+        target_cfg = self.cfg.target
         probs = torch.rand(len(env_ids), device=self.device)
         is_place_local = probs < target_cfg.init.place_prob # shape: [len(env_ids)]
         
         self.is_place[env_ids] = is_place_local
         self.is_pick[env_ids] = ~is_place_local
-        
         self.task_flags[env_ids] = is_place_local.float().unsqueeze(-1)
 
-        # --- Shape Type Selection ---
-        # 1. Select non-box types for all environments initially to ensure Pick tasks don't get Box
+    def _select_shape_types(self, env_ids):
+        """ Select shape types for each environment, overriding for Place tasks """
+        # 1. Random Selection (Default)
         other_indices = [i for i, name in enumerate(self.shape_types_list) if name != "box"]
         if other_indices:
             other_tensor = torch.tensor(other_indices, device=self.device)
@@ -1266,20 +1314,35 @@ class LeggedRobotNav(LeggedRobot):
         else:
             type_indices = torch.randint(0, len(self.shape_types_list), (len(env_ids),), device=self.device)
         
-        # 2. Override for Place Task: Must be Hollow Box (Well), never fallback to Cuboid
-        if "box" in self.shape_types_list:
-            box_idx = self.shape_types_list.index("box")
-            type_indices[is_place_local] = box_idx
-        else:
-            # If no hollow box available, place task is impossible
-            is_place_local[:] = False
-            self.is_place[env_ids] = False
-            self.is_pick[env_ids] = True
-            self.task_flags[env_ids] = 0.
+        # 2. Override for Place Task
+        is_place_local = self.is_place[env_ids]
+        if is_place_local.any():
+            place_type_indices = []
+            if "box" in self.shape_types_list:
+                place_type_indices.append(self.shape_types_list.index("box"))
+            if "cylinder_well" in self.shape_types_list:
+                place_type_indices.append(self.shape_types_list.index("cylinder_well"))
+                
+            if len(place_type_indices) > 0:
+                idx_selector = torch.randint(0, len(place_type_indices), (len(env_ids),), device=self.device)
+                chosen_place_indices = torch.tensor(place_type_indices, device=self.device)[idx_selector]
+                
+                # Apply only to place tasks
+                type_indices[is_place_local] = chosen_place_indices[is_place_local]
+            else:
+                # Fallback: No placeable shapes available -> Convert to Pick
+                self.is_place[env_ids] = False
+                self.is_pick[env_ids] = True
+                self.task_flags[env_ids] = 0.
             
         self.env_shape_type_indices[env_ids] = type_indices
-        
-        # 2. Iterate over types
+
+    def _sample_shape_parameters(self, env_ids):
+        """ Sample shape dimensions and surface points """
+        target_cfg = self.cfg.target
+        is_place_local = self.is_place[env_ids]
+
+        # Iterate over types
         for i, type_name in enumerate(self.shape_types_list):
             subset_indices = self.env_shape_type_indices[env_ids]
             mask = (subset_indices == i)
@@ -1287,44 +1350,17 @@ class LeggedRobotNav(LeggedRobot):
             if not mask.any():
                 continue
             
-            # Get subset for this type
             current_ids = env_ids[mask]
             current_is_place = is_place_local[mask]
             count = len(current_ids)
             
-            # Generate random params
-            if type_name == "cylinder":
-                r = torch_rand_float(target_cfg.shape.radius_range[0], target_cfg.shape.radius_range[1], (count, 1), device=self.device)
-                h = torch_rand_float(target_cfg.shape.height_range[0], target_cfg.shape.height_range[1], (count, 1), device=self.device)
-                params = torch.cat([r, h], dim=1)
-            elif type_name == "cuboid" or type_name == "box":
-                # Sample Small (Pick)
-                x_s = torch_rand_float(target_cfg.shape.dims_range[0][0], target_cfg.shape.dims_range[0][1], (count, 1), device=self.device)
-                y_s = torch_rand_float(target_cfg.shape.dims_range[1][0], target_cfg.shape.dims_range[1][1], (count, 1), device=self.device)
-                z_s = torch_rand_float(target_cfg.shape.dims_range[2][0], target_cfg.shape.dims_range[2][1], (count, 1), device=self.device)
-                
-                # Sample Large (Place)
-                x_l = torch_rand_float(target_cfg.shape.box_dims_range[0][0], target_cfg.shape.box_dims_range[0][1], (count, 1), device=self.device)
-                y_l = torch_rand_float(target_cfg.shape.box_dims_range[1][0], target_cfg.shape.box_dims_range[1][1], (count, 1), device=self.device)
-                z_l = torch_rand_float(target_cfg.shape.box_dims_range[2][0], target_cfg.shape.box_dims_range[2][1], (count, 1), device=self.device)
-                
-                # Select based on task
-                x = torch.where(current_is_place.unsqueeze(-1), x_l, x_s)
-                y = torch.where(current_is_place.unsqueeze(-1), y_l, y_s)
-                z = torch.where(current_is_place.unsqueeze(-1), z_l, z_s)
-                
-                params = torch.cat([x, y, z], dim=1)
-            elif type_name == "sphere":
-                r = torch_rand_float(target_cfg.shape.radius_range[0], target_cfg.shape.radius_range[1], (count, 1), device=self.device)
-                params = r
-            elif type_name == "ellipsoid":
-                # Sample 3 dims from ellipsoid_dims_range
-                # range is [[min,max], [min,max], [min,max]] (diameters)
-                x = torch_rand_float(target_cfg.shape.ellipsoid_dims_range[0][0], target_cfg.shape.ellipsoid_dims_range[0][1], (count, 1), device=self.device)
-                y = torch_rand_float(target_cfg.shape.ellipsoid_dims_range[1][0], target_cfg.shape.ellipsoid_dims_range[1][1], (count, 1), device=self.device)
-                z = torch_rand_float(target_cfg.shape.ellipsoid_dims_range[2][0], target_cfg.shape.ellipsoid_dims_range[2][1], (count, 1), device=self.device)
-                params = torch.cat([x, y, z], dim=1)
+            params = self._generate_shape_params(type_name, count, current_ids, current_is_place, target_cfg)
             
+            if type_name == "ycb":
+                # YCB params logic is handled inside _generate_shape_params via side-effects or returns
+                # Here we just continue because YCB handles its own sampling
+                continue 
+
             # Compute dims
             dims = PCATargetTracker.compute_object_dims(type_name, params, self.device)
             
@@ -1342,119 +1378,137 @@ class LeggedRobotNav(LeggedRobot):
             self.tracker.object_dims[env_ids] = self.object_dims[env_ids]
             self.tracker.local_points[env_ids] = self.local_points[env_ids]
             self.tracker.local_normals[env_ids] = self.local_normals[env_ids]
+            
+    def _generate_shape_params(self, type_name, count, current_ids, current_is_place, target_cfg):
+        """ Helper to generate random parameters for a specific shape type """
+        if type_name == "cylinder":
+            r = torch_rand_float(target_cfg.shape.radius_range[0], target_cfg.shape.radius_range[1], (count, 1), device=self.device)
+            h = torch_rand_float(target_cfg.shape.height_range[0], target_cfg.shape.height_range[1], (count, 1), device=self.device)
+            return torch.cat([r, h], dim=1)
+            
+        elif type_name == "cylinder_well":
+            r = torch_rand_float(target_cfg.shape.box_dims_range[0][0]/2.0, target_cfg.shape.box_dims_range[0][1]/2.0, (count, 1), device=self.device)
+            h = torch_rand_float(target_cfg.shape.box_dims_range[2][0], target_cfg.shape.box_dims_range[2][1], (count, 1), device=self.device)
+            return torch.cat([r, h], dim=1)
+            
+        elif type_name == "cuboid" or type_name == "box":
+            # Sample Small (Pick)
+            x_s = torch_rand_float(target_cfg.shape.dims_range[0][0], target_cfg.shape.dims_range[0][1], (count, 1), device=self.device)
+            y_s = torch_rand_float(target_cfg.shape.dims_range[1][0], target_cfg.shape.dims_range[1][1], (count, 1), device=self.device)
+            z_s = torch_rand_float(target_cfg.shape.dims_range[2][0], target_cfg.shape.dims_range[2][1], (count, 1), device=self.device)
+            
+            # Sample Large (Place)
+            x_l = torch_rand_float(target_cfg.shape.box_dims_range[0][0], target_cfg.shape.box_dims_range[0][1], (count, 1), device=self.device)
+            y_l = torch_rand_float(target_cfg.shape.box_dims_range[1][0], target_cfg.shape.box_dims_range[1][1], (count, 1), device=self.device)
+            z_l = torch_rand_float(target_cfg.shape.box_dims_range[2][0], target_cfg.shape.box_dims_range[2][1], (count, 1), device=self.device)
+            
+            # Select based on task
+            x = torch.where(current_is_place.unsqueeze(-1), x_l, x_s)
+            y = torch.where(current_is_place.unsqueeze(-1), y_l, y_s)
+            z = torch.where(current_is_place.unsqueeze(-1), z_l, z_s)
+            return torch.cat([x, y, z], dim=1)
+            
+        elif type_name == "sphere":
+            return torch_rand_float(target_cfg.shape.radius_range[0], target_cfg.shape.radius_range[1], (count, 1), device=self.device)
+            
+        elif type_name == "ellipsoid":
+            x = torch_rand_float(target_cfg.shape.ellipsoid_dims_range[0][0], target_cfg.shape.ellipsoid_dims_range[0][1], (count, 1), device=self.device)
+            y = torch_rand_float(target_cfg.shape.ellipsoid_dims_range[1][0], target_cfg.shape.ellipsoid_dims_range[1][1], (count, 1), device=self.device)
+            z = torch_rand_float(target_cfg.shape.ellipsoid_dims_range[2][0], target_cfg.shape.ellipsoid_dims_range[2][1], (count, 1), device=self.device)
+            return torch.cat([x, y, z], dim=1)
+            
+        elif type_name == "ycb":
+            num_ycb = self.ycb_manager.get_num_objects()
+            if num_ycb > 0:
+                indices = torch.randint(0, num_ycb, (count,), device=self.device)
+            else:
+                indices = torch.zeros(count, dtype=torch.long, device=self.device)
+            
+            self.ycb_indices[current_ids] = indices
+            extents, _ = self.ycb_manager.get_info(indices)
+            self.object_dims[current_ids] = extents
+            pts, nrms = self.shapes["ycb"].sample_surface(target_cfg.perception.num_sample_points, count, indices)
+            self.local_points[current_ids] = pts
+            self.local_normals[current_ids] = nrms
+            return None # YCB handled directly
 
-        self.max_dim_vals[env_ids], self.max_dim_inds[env_ids] = torch.max(self.object_dims[env_ids], dim=1) # [N], [N]
+        return None
+
+    def _update_object_state_flags(self, env_ids):
+        """ Update object state flags like vertical/horizontal, size, long/short logic etc. """
+        self.max_dim_vals[env_ids], self.max_dim_inds[env_ids] = torch.max(self.object_dims[env_ids], dim=1)
         
-        # Determine Vertical/Horizontal (50% chance)
+        # 1. Determine Vertical/Horizontal
         random_vertical = torch.rand(len(env_ids), device=self.device) < self.cfg.target.init.vertical_prob
+        
         # Force Place Task to be Horizontal (Standard orientation)
-        # This ensures Local Z is World Z, simplifying target calculation
+        is_place_local = self.is_place[env_ids]
         random_vertical[is_place_local] = False
+        
         self.obj_is_vertical[env_ids] = random_vertical
+        
+        # [Fix] Force YCB objects to be Vertical
+        if "ycb" in self.shape_types_list:
+            ycb_idx = self.shape_types_list.index("ycb")
+            is_ycb = (self.env_shape_type_indices[env_ids] == ycb_idx)
+            self.obj_is_vertical[env_ids][is_ycb] = True
         
         is_horizontal = ~self.obj_is_vertical[env_ids]
         is_large = self.max_dim_vals[env_ids] > self.gripper_width
+
+        # 2. Identify "Round-ish" Objects (Isotropic)
+        sorted_dims, _ = torch.sort(self.object_dims[env_ids], dim=1, descending=True)
+        # If ratio of Intermediate / Longest > 0.6, considered isotropic
+        is_isotropic = (sorted_dims[:, 1] / sorted_dims[:, 0]) > 0.6
         
-        # Check if Sphere
-        is_sphere = torch.zeros_like(is_horizontal, dtype=torch.bool)
-        if "sphere" in self.shape_types_list:
-            sphere_idx = self.shape_types_list.index("sphere")
-            is_sphere = (self.env_shape_type_indices[env_ids] == sphere_idx)
-            
-        # Too Long = Horizontal AND Large AND Not Sphere
-        # Keep Ellipsoid as "long" if it's large and horizontal? Or user wants it as "short"?
-        # User said "sphere is too symmetrical, need ellipsoid as short logic task".
-        # So Ellipsoid should be treated likely as "Not Too Long" or similar to Sphere logic if it's small.
-        # But if it's elongated, it might be "long".
-        # However, the user explicitly asked for ellipsoid to replace sphere for short logic.
-        # So we should exclude ellipsoid from "obj_is_too_long" logic OR ensure its dimensions are small?
-        # If we treat it as sphere, we just add it to the exclusion.
+        # 3. Determine "Too Long" (triggers Long Logic)
+        # Too Long = Horizontal AND Large AND Not Isotropic
+        self.obj_is_too_long[env_ids] = is_horizontal & is_large & (~is_isotropic)
         
-        # Check if Ellipsoid
-        is_ellipsoid = torch.zeros_like(is_horizontal, dtype=torch.bool)
-        if "ellipsoid" in self.shape_types_list:
-            ellipsoid_idx = self.shape_types_list.index("ellipsoid")
-            is_ellipsoid = (self.env_shape_type_indices[env_ids] == ellipsoid_idx)
-            
-        self.obj_is_too_long[env_ids] = is_horizontal & is_large & (~is_sphere) & (~is_ellipsoid)
-        
-        # Compute Z Offset
+        # 4. Compute Z Offset (Height above ground)
         z_off = torch.zeros_like(self.object_dims[env_ids, 2])
-        
-        if "cylinder" in self.shape_types_list:
-            cyl_idx = self.shape_types_list.index("cylinder")
-            is_cyl = (self.env_shape_type_indices[env_ids] == cyl_idx)
-            
-            # Vertical: h/2 (dims[2]/2)
-            # Horizontal: d/2 (dims[0]/2)
-            mask_v = is_cyl & self.obj_is_vertical[env_ids]
-            mask_h = is_cyl & (~self.obj_is_vertical[env_ids])
-            
-            if mask_v.any():
-                z_off[mask_v] = self.object_dims[env_ids][mask_v, 2] / 2.0
-            if mask_h.any():
-                z_off[mask_h] = self.object_dims[env_ids][mask_h, 0] / 2.0
-            
-        if "cuboid" in self.shape_types_list:
-            cub_idx = self.shape_types_list.index("cuboid")
-            is_cub = (self.env_shape_type_indices[env_ids] == cub_idx)
-            
-            # Vertical: y/2 (dims[1]/2)
-            # Horizontal: z/2 (dims[2]/2)
-            mask_v = is_cub & self.obj_is_vertical[env_ids]
-            mask_h = is_cub & (~self.obj_is_vertical[env_ids])
-            
-            if mask_v.any():
-                z_off[mask_v] = self.object_dims[env_ids][mask_v, 1] / 2.0
-            if mask_h.any():
-                z_off[mask_h] = self.object_dims[env_ids][mask_h, 2] / 2.0
-            
-        if "box" in self.shape_types_list:
-            box_idx = self.shape_types_list.index("box")
-            is_box = (self.env_shape_type_indices[env_ids] == box_idx)
-            
-            # Vertical: y/2 (dims[1]/2)
-            # Horizontal: z/2 (dims[2]/2)
-            mask_v = is_box & self.obj_is_vertical[env_ids]
-            mask_h = is_box & (~self.obj_is_vertical[env_ids])
-            
-            if mask_v.any():
-                z_off[mask_v] = self.object_dims[env_ids][mask_v, 1] / 2.0
-            if mask_h.any():
-                z_off[mask_h] = self.object_dims[env_ids][mask_h, 2] / 2.0
-            
-            self.object_z_offset[env_ids] = z_off
-            mask_h = is_box & (~self.obj_is_vertical[env_ids])
-            
-            if mask_v.any():
-                z_off[mask_v] = self.object_dims[env_ids][mask_v, 1] / 2.0
-            if mask_h.any():
-                z_off[mask_h] = self.object_dims[env_ids][mask_h, 2] / 2.0
-            
-        if "sphere" in self.shape_types_list:
-            sph_idx = self.shape_types_list.index("sphere")
-            is_sph = (self.env_shape_type_indices[env_ids] == sph_idx)
-            if is_sph.any():
-                z_off[is_sph] = self.object_dims[env_ids][is_sph, 2] / 2.0
-                
-        if "ellipsoid" in self.shape_types_list:
-            ellipsoid_idx = self.shape_types_list.index("ellipsoid")
-            is_ellipsoid = (self.env_shape_type_indices[env_ids] == ellipsoid_idx)
-            # Ellipsoid center is at [0,0,0] originally. 
-            # We want it to rest on ground?
-            # If so, Z-offset should be rz (dims[2]/2).
-            # Whether vertical or horizontal, we just use the current Z-dimension / 2.
-            # Unlike cylinder/cuboid which swap dims based on orientation,
-            # Ellipsoid dimensions are set in params. 
-            # If we don't rotate it explicitly by swapping dims, dims[2] is always the Z radius * 2.
-            # But wait, we might rotate it later.
-            # The current logic sets z_offset based on current active Z-dim.
-            # For ellipsoid, the dims are sampled as (x,y,z).
-            # If we assume it spawns axis-aligned, then z_off is dims[2]/2.
-            if is_ellipsoid.any():
-                z_off[is_ellipsoid] = self.object_dims[env_ids][is_ellipsoid, 2] / 2.0
-            
+        self._compute_z_offsets(env_ids, z_off)
         self.object_z_offset[env_ids] = z_off
+
+    def _compute_z_offsets(self, env_ids, z_off):
+        """ Compute Z offsets based on type and orientation """
+        # Only iterate over types present in the list
+        for type_name in self.shape_types_list:
+             if type_name not in self.shapes: continue # Safety check
+             
+             type_idx = self.shape_types_list.index(type_name)
+             mask_type = (self.env_shape_type_indices[env_ids] == type_idx)
+             
+             if not mask_type.any(): continue
+             
+             # Sub-mask for orientation
+             mask_v = mask_type & self.obj_is_vertical[env_ids]
+             mask_h = mask_type & (~self.obj_is_vertical[env_ids])
+             
+             dims = self.object_dims[env_ids]
+             
+             if type_name == "cylinder":
+                 # Vertical: h/2 (dims[2]/2), Horizontal: d/2 (dims[0]/2)
+                 if mask_v.any(): z_off[mask_v] = dims[mask_v, 2] / 2.0
+                 if mask_h.any(): z_off[mask_h] = dims[mask_h, 0] / 2.0
+                 
+             elif type_name in ["cuboid", "box"]:
+                 # Vertical: y/2 (dims[1]/2) - assuming Y is length?, Horizontal: z/2 (dims[2]/2)
+                 if mask_v.any(): z_off[mask_v] = dims[mask_v, 1] / 2.0
+                 if mask_h.any(): z_off[mask_h] = dims[mask_h, 2] / 2.0
+                 
+             elif type_name == "cylinder_well":
+                  if mask_type.any(): z_off[mask_type] = dims[mask_type, 2] / 2.0
+                  
+             elif type_name == "sphere":
+                  if mask_type.any(): z_off[mask_type] = dims[mask_type, 2] / 2.0
+                  
+             elif type_name == "ellipsoid":
+                  if mask_type.any(): z_off[mask_type] = dims[mask_type, 2] / 2.0
+                  
+             elif type_name == "ycb":
+                  if mask_type.any(): z_off[mask_type] = dims[mask_type, 2] / 2.0
+
 
     def _resample_object_positions(self, env_ids):
         """ set the goal position in the visualable zone of the camera
@@ -1708,11 +1762,52 @@ class LeggedRobotNav(LeggedRobot):
         )
         self.vis_weights[:] = weights
 
+        # --- Handle Invalid / Out of View (Simulation of Kalman Filter Prediction) ---
+        if not hasattr(self, 'last_valid_sigma_points_world'):
+            self.last_valid_sigma_points_world = sigma_points_3d.clone()
+
+        # Handle Resets: Initialize with current GT (assuming known start pose or instant acquire)
+        reset_mask = self.episode_length_buf <= 1
+        if reset_mask.any():
+            self.last_valid_sigma_points_world[reset_mask] = sigma_points_3d[reset_mask]
+
+        # Update Last Valid only for strictly valid observations
+        if is_valid.any():
+            self.last_valid_sigma_points_world[is_valid] = sigma_points_3d[is_valid]
+
+        # Propagate Last Valid World Position when invalid
+        # Real-world KF only predicts the main point (Index 0). 
+        # For invalid frames, we collapse all sigma points to the last valid main point.
         valid_mask = is_valid.view(self.num_envs, 1, 1)
-        # Use object center + persistent per-episode offset when perception is invalid
-        dummy_pos = self.object_pos + self.dummy_sigma_points_offset
-        dummy_sigma_points_3d = dummy_pos.view(self.num_envs, 1, 3).expand_as(sigma_points_3d)
-        sigma_points_3d = torch.where(valid_mask, sigma_points_3d, dummy_sigma_points_3d)
+
+        last_valid_center = self.last_valid_sigma_points_world[:, 0:1, :] # [N, 1, 3]
+        prediction_collapsed = last_valid_center.expand(-1, sigma_points_3d.shape[1], -1)
+
+        sigma_points_3d = torch.where(valid_mask, sigma_points_3d, prediction_collapsed)
+
+
+        # valid_mask = is_valid.view(self.num_envs, 1, 1)
+        # # Use object center + persistent per-episode offset when perception is invalid
+        # dummy_pos = self.object_pos + self.dummy_sigma_points_offset
+        # dummy_sigma_points_3d = dummy_pos.view(self.num_envs, 1, 3).expand_as(sigma_points_3d)
+        # sigma_points_3d = torch.where(valid_mask, sigma_points_3d, dummy_sigma_points_3d)
+
+
+        # --- Filter Sigma Points ---
+        if not hasattr(self, 'sigma_points_filtered'):
+            self.sigma_points_filtered = sigma_points_3d.clone()
+            self.filter_reset_mask = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        
+        # Reset filters for reset envs
+        if self.filter_reset_mask.any():
+            self.sigma_points_filtered[self.filter_reset_mask] = sigma_points_3d[self.filter_reset_mask]
+            self.filter_reset_mask[:] = False
+            
+        # Apply EMA filter (alpha=0.3) for place tasks, passthrough (alpha=1.0) otherwise
+        alphas = torch.where(self.is_place, 0.4, 1.0).view(-1, 1, 1)
+        self.sigma_points_filtered = torch.lerp(self.sigma_points_filtered, sigma_points_3d, alphas)
+        sigma_points_3d = self.sigma_points_filtered.clone()
+        # ---------------------------
 
         # Simulate frame drops
         if self.cfg.commands.frame_drop_prob > 0:
@@ -1731,10 +1826,6 @@ class LeggedRobotNav(LeggedRobot):
                 raise ValueError(f"Unsupported sigma_frame: {self.cfg.env.sigma_frame}")
             invalid_sigma = torch.ones_like(sigma_points_obs_unmasked) * -1.0
 
-            if self.cfg.commands.enable_place_offset:
-                # Apply place offset to z coordinate of sigma points when placing
-                sigma_points_obs_unmasked[self.is_place, :, 2:3] += self.place_offset[self.is_place].unsqueeze(-1) # farther away in z when placing
-
             # [Note] Noise is now structured and added inside tracker.py
             
             if self.cfg.commands.enable_invalid_cmds:
@@ -1744,6 +1835,11 @@ class LeggedRobotNav(LeggedRobot):
                         # Add drift for those out of view
                         # drift step: N(0, scale)
                         drift_step = torch.randn_like(self.out_of_view_drift[~is_valid]) * self.cfg.commands.drift_scale
+                        
+                        # Simulate sensor drift towards robot front (Camera: +Z, Base: +X)
+                        forward_axis = 2 if self.cfg.env.sigma_frame == "camera" else 0
+                        drift_step[:, :, forward_axis] += self.cfg.commands.drift_scale
+
                         self.out_of_view_drift[~is_valid] += drift_step
                         self.out_of_view_drift = torch.clamp(self.out_of_view_drift, 
                                                             min=-self.cfg.commands.max_drift, 
@@ -1780,6 +1876,7 @@ class LeggedRobotNav(LeggedRobot):
         # 3. Update nav_commands
         self.nav_commands = self.sigma_points_obs[:, :self.cfg.env.num_nav_commands//3].reshape(self.num_envs, -1)  # [N, D]
 
+        # Update nav_commands_buffer every 10 steps (200ms)
         env_ids = (self.episode_length_buf % 10 == 0).nonzero(as_tuple=False).flatten()
         self.nav_commands_buffer[env_ids] = torch.where(
             (self.episode_length_buf[env_ids] <= 1)[:, None, None],
@@ -2053,7 +2150,7 @@ class LeggedRobotNav(LeggedRobot):
                                 self.task_id, # dim 1
                                 self.all_valid_sigma_points, # dim 21
                                 # ------- privileged information end -------
-                                self.nav_commands_buffer.view(self.num_envs, -1), # dim 21*50, TCN handling 
+                                self.nav_commands_buffer.view(self.num_envs, -1), # dim 21*5, TCN handling 
                                 self.obs_hist_buffer.view(self.num_envs, -1)], dim=-1) # dim 35*5
 
     # ------------- Cameras -------------
@@ -2266,7 +2363,9 @@ class LeggedRobotNav(LeggedRobot):
         all_allow_visible = not self.cfg.commands.enable_invalid_cmds
         if all_allow_visible:
             return torch.zeros_like(self.is_valid).float()
-        return (~self.is_valid).float() * (~self.is_success_state).float() * (~self.force_look_triggered).float() * (self.obj_is_too_long).float()
+        pick_short_success = (~self.obj_is_too_long) * (self.is_success_state) * self.is_pick
+        place_near_success = (self.is_place) * (self.distance < 1.5)
+        return (~self.is_valid).float() * (~pick_short_success) * (~place_near_success)
 
     def _reward_optimal_pos_tracking(self):
         """
@@ -2328,19 +2427,19 @@ class LeggedRobotNav(LeggedRobot):
 
         lin_vel_sq = torch.sum(torch.square(self.base_lin_vel), dim=1)
         ang_vel_sq = torch.sum(torch.square(self.base_ang_vel), dim=1)
-        r_vel = torch.exp(-(lin_vel_sq + ang_vel_sq) / self.cfg.rewards.soft_sigma) # sigma ~ 0.2 m/s
+        _stand_still = torch.logical_and(self.base_lin_vel[:, 0] < 0.1, self.base_lin_vel[:, 0] > 0.0)  # robot should slow down when approaching the target
+        # _slow_approach = torch.logical_and(self.base_lin_vel[:, 0] < 0.2, self.base_lin_vel[:, 0] > 0.0)  # robot should slow down when approaching the target
+        _no_rotation = self.base_ang_vel[:, 2].abs() < 0.1  # reduce angular velocity
+        r_vel = torch.exp(-(lin_vel_sq + ang_vel_sq) / self.cfg.rewards.pos_track_sigma) # sigma ~ 0.2 m/s
 
         # _rew_pick = self.is_pick * r_rot * (1 + self.cfg.rewards.weight_track_pick_pos * r_pos_pick)
 
-        _rew_short_pick = self.is_pick * (~self.obj_is_too_long) * r_rot * (1.0 + 1.0 * self.cfg.rewards.weight_track_pick_pos)
+        _rew_short_pick = self.is_pick * (~self.obj_is_too_long) * r_rot * (1.0 + 1.0 * self.cfg.rewards.weight_track_pick_pos * r_pos_short_pick)
         _rew_long_pick = self.is_pick * (self.obj_is_too_long) * r_rot * (1.0 + self.cfg.rewards.weight_track_pick_pos * r_pos_long_pick)
-        _rew_pick = _rew_short_pick + _rew_long_pick
-        _rew_place = self.is_place * r_rot * (0.5 + self.cfg.rewards.weight_track_place_pos * r_pos_place)
-        no_move = torch.logical_and(
-            torch.norm(self.base_lin_vel, dim=1) < 0.1,
-            torch.norm(self.base_ang_vel, dim=1) < 0.1
-        )
-        return self.is_success_state.float() * (_rew_pick + _rew_place) * r_vel * (1 + 0.0 * no_move.float())
+        _rew_pick = _rew_short_pick * _stand_still + _rew_long_pick
+        _rew_place = self.is_place * r_rot * (1.0 + self.cfg.rewards.weight_track_place_pos * r_pos_place) * _no_rotation
+
+        return self.is_success_state.float() * (_rew_pick + _rew_place) * r_vel
 
     def _reward_backup(self):
         """ Reward for backing up when too close to the object
@@ -2379,6 +2478,8 @@ class LeggedRobotNav(LeggedRobot):
         # Distance to Path (Cross Track Error)
         d_path_diff_2d = gripper_pos_2d - p_closest_2d
         
+        _slow_approach = torch.logical_and(self.base_lin_vel[:, 0] < 0.2, self.base_lin_vel[:, 0] > 0.0)  # robot should slow down when approaching the target
+        _no_rotation = self.base_ang_vel[:, 2].abs() < 0.1  # reduce angular velocity
         # Rewards
         # 1. Path Following Reward (Pulls to Hint if t<0, then keeps on line)
         # Strict corridor (20 cm)
@@ -2397,8 +2498,9 @@ class LeggedRobotNav(LeggedRobot):
         # 3. Goal Reaching Reward (Pulls along line to Optimal)
         _rew_short_pick = self.is_pick * (~self.obj_is_too_long) * r_path * r_rot * (1.0 + self.cfg.rewards.weight_track_pick_pos * r_pos_short_pick)
         _rew_long_pick = self.is_pick * (self.obj_is_too_long) * r_path * r_rot * (1.0 + self.cfg.rewards.weight_track_pick_pos * r_pos_long_pick)
-        _rew_pick = _rew_short_pick + _rew_long_pick
-        _rew_place = self.is_place * r_path * r_rot * (0.5 + self.cfg.rewards.weight_track_place_pos * r_pos_place)
+        _rew_pick = _rew_short_pick * _slow_approach + _rew_long_pick
+        _rew_place = self.is_place * r_path * r_rot * (1.0 + self.cfg.rewards.weight_track_place_pos * r_pos_place) * _no_rotation
+        
         return (_rew_pick + _rew_place)
 
     def _reward_place_right_pitch(self):
@@ -2406,11 +2508,18 @@ class LeggedRobotNav(LeggedRobot):
         """
         pitch_err_sq = torch.square(self.pitch_err)
         r_pitch = torch.exp(-pitch_err_sq / self.cfg.rewards.soft_sigma) # sigma ~ 0.14 rad
-        lookup = self.euler_rpy[:, 1] < 0.0
+        lookup = self.euler_rpy[:, 1] < -0.1
         lookup_mag = torch.abs(self.euler_rpy[:, 1]) * (lookup.float())
-        should_pitch = torch.logical_and(self.d_goal_err_x < 0.10, self.d_goal_err_y < 0.05)
-        return self.is_place * ( 2 * (should_pitch) * r_pitch - \
-                                 2 * self.far_target.float() * lookup_mag )
+        should_lookup = torch.logical_and(self.d_goal_err_x < 0.10, self.d_goal_err_y < 0.05)
+        return self.is_place * ( 1 * (should_lookup) * r_pitch - \
+                                 5 * self.far_target.float() * lookup_mag )
+    
+    def _reward_place_pitch_stable(self):
+        """ Reward for having a stable pitch angle when placing
+        """
+        pitch_err_sq = torch.square(self.pitch_err)
+        r_pitch = torch.exp(-pitch_err_sq / self.cfg.rewards.soft_sigma) # sigma ~ 0.14 rad
+        return self.is_place * r_pitch
 
     def _reward_invalid_stand_still(self):
         """ Reward for standing still when all sigma points are invalid
