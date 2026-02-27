@@ -1,10 +1,12 @@
 
 import torch
 import numpy as np
+import os
 from legged_gym.perception.surface_geometry import Cylinder, Cuboid, Sphere, Box, Ellipsoid, CylinderWell
 from legged_gym.perception.ycb_geometry import YCBManager, YCBGeometry
 from isaacgym.torch_utils import *
 from legged_gym.perception.tracker import PCATargetTracker
+from legged_gym import LEGGED_GYM_ROOT_DIR
 
 class ObjectManager:
     """
@@ -19,7 +21,7 @@ class ObjectManager:
         self.num_envs = num_envs
         self.gripper_width = gripper_width
         self.camera_params_dict = camera_params_dict
-        self.ycb_root = ycb_root if ycb_root else "/home/robot/project/legged_gym/obj_set"
+        self.ycb_root = ycb_root if ycb_root else os.path.join(LEGGED_GYM_ROOT_DIR, "obj_set")
         
         self.shape_types_list = self.target_cfg.shape.types
         

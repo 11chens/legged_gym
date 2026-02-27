@@ -159,7 +159,7 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
                 max_dist = 1.5  # maximum time to reach the target [s]
 
     class gripper:
-        gripper_offset = [0.4, 0.0, -0.10] # [m] offset from base link to gripper center in base frame
+        gripper_offset = [0.42, 0.0, -0.03] # [m] offset from base link to gripper center in base frame
         gripper_width = 0.12 # [m]
     
     class camera_sensor:
@@ -316,7 +316,7 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
             nav_action_limit = -0.1
 
             # New rewards for sigma points
-            missing_sigma_points = -0.2
+            missing_sigma_points = -0.1
             successful_grasp = 20.0
             backup = -4
             sequential_reaching = 0.4

@@ -70,7 +70,7 @@ def play(args):
     env: LeggedRobotNav
     env_cfg: Go2NavFlatCfg
 
-    # args.load_run = '02_12_22-29-58_'
+    args.load_run = '02_14_00-01-30_'
     # args.checkpoint = 400
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     # override some parameters for testing
@@ -144,9 +144,9 @@ def play(args):
     policy = ppo_runner.get_inference_policy(device=env.device)
 
     if args.onnx:
-        # onnx_dir = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs',
-        #                     train_cfg.runner.experiment_name, 'exported')
-        onnx_dir = '/home/robot/Data/onboard_data/onnx_models/homi/nav_model'
+        onnx_dir = os.path.join(LEGGED_GYM_ROOT_DIR, 'logs',
+                            train_cfg.runner.experiment_name, 'exported')
+        # onnx_dir = '/home/robot/Data/onboard_data/onnx_models/homi/nav_model'
         os.makedirs(onnx_dir, exist_ok=True)
         ppo_runner.alg.actor_critic.export_onnx_model(onnx_dir=onnx_dir)
         
@@ -338,7 +338,7 @@ def play(args):
 
         distance = env.distance[0].item()
 
-        print(f"main sigma points: ({main_x}, {main_y}, {main_z})")
+        # print(f"main sigma points: ({main_x}, {main_y}, {main_z})")
 
         # print(f"vel: ({vx:.2f}, {vy:.2f}, {vyaw:.2f}, {pitch:.2f})")
         # print(f"Command: (sig_x: {sig_x:.2f}, sig_y: {sig_y:.2f}, sig_z: {sig_z:.2f})")
