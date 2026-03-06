@@ -316,7 +316,7 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
             nav_action_limit = -0.1
 
             # New rewards for sigma points
-            missing_sigma_points = -0.2
+            missing_sigma_points = -0.1
             successful_grasp = 20.0
             backup = -4
             sequential_reaching = 0.4
