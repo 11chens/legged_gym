@@ -112,6 +112,21 @@ class Terrain:
                                 length=self.width_per_env_pixels,
                                 vertical_scale=self.cfg.vertical_scale,
                                 horizontal_scale=self.cfg.horizontal_scale)
+        
+        if hasattr(self.cfg, 'terrain_types') and self.cfg.terrain_types:
+            idx = 0
+            for i in range(len(self.proportions)):
+                if choice < self.proportions[i]:
+                    idx = i
+                    break
+            t_type = self.cfg.terrain_types[idx] if idx < len(self.cfg.terrain_types) else 'slope'
+            
+            if t_type == 'flat':
+                return terrain
+            elif t_type == 'rough':
+                terrain_utils.random_uniform_terrain(terrain, min_height=-0.05, max_height=0.05, step=0.005, downsampled_scale=0.2)
+                return terrain
+
         slope = difficulty * 0.4
         step_height = 0.05 + 0.18 * difficulty
         discrete_obstacles_height = 0.05 + difficulty * 0.2

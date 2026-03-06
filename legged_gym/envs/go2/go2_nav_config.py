@@ -159,7 +159,7 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
                 max_dist = 1.5  # maximum time to reach the target [s]
 
     class gripper:
-        gripper_offset = [0.4, 0.0, -0.10] # [m] offset from base link to gripper center in base frame
+        gripper_offset = [0.40, 0.0, -0.06] # [m] offset from base link to gripper center in base frame
         gripper_width = 0.12 # [m]
     
     class camera_sensor:
@@ -201,7 +201,7 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
         class extrinsics: # Extrinsics parameters
             #  ================= fixed extrinsics =================
             translation = [0.305, 0.017, 0.128]  # Translation: forward, left, upward
-            angles = [0.0, 37.0, 0.0]  # Euler angles: yaw, pitch, roll
+            angles = [0.0, 35.0, 0.0]  # Euler angles: yaw, pitch, roll
             
             #  ================= random extrinsics =================
             # Randomization ranges around the fixed extrinsics
