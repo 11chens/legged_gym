@@ -241,7 +241,6 @@ class LeggedRobotNav(LeggedRobot):
         self.nav_actions = torch.zeros(self.num_envs, self.cfg.env.num_nav_actions, dtype=torch.float, device=self.device, requires_grad=False)
         self.last_orig_nav_actions = torch.zeros(self.num_envs, self.cfg.env.num_nav_actions, dtype=torch.float, device=self.device, requires_grad=False)
         self.last_dof_actions = torch.zeros(self.num_envs, 12, dtype=torch.float, device=self.device, requires_grad=False)
-        self.place_offset = torch.zeros((self.num_envs, 1), device=self.device)
 
         self.nav_actions_buffer = torch.zeros(self.num_envs, self.cfg.env.history_len, self.cfg.env.num_nav_actions, dtype=torch.float, device=self.device, requires_grad=False)
         self.nav_commands_buffer = torch.zeros(self.num_envs, self.cfg.env.nav_history_len, self.cfg.commands.num_nav_commands, dtype=torch.float, device=self.device, requires_grad=False)
@@ -251,9 +250,8 @@ class LeggedRobotNav(LeggedRobot):
         self.raw_obs_buffer = torch.zeros(self.num_envs, self.cfg.env.history_len + 10, self.cfg.env.num_props, dtype=torch.float, device=self.device, requires_grad=False)
         self.current_perceived_obs = torch.zeros(self.num_envs, self.cfg.env.num_props, dtype=torch.float, device=self.device, requires_grad=False)
         
-        self.alpha = torch.zeros(self.num_envs, 1, dtype=torch.float, device=self.device)
+        self.cmds_alpha = torch.zeros(self.num_envs, 1, dtype=torch.float, device=self.device)
         self.sigma_points_alpha = torch.zeros(self.num_envs, 1, dtype=torch.float, device=self.device)
-        self.dummy_sigma_points_offset = torch.zeros(self.num_envs, 3, device=self.device)
         self.vis_weights = torch.zeros(self.num_envs, self.cfg.target.perception.num_sample_points, 1, device=self.device)
         self.is_valid = torch.ones(self.num_envs, dtype=torch.bool, device=self.device, requires_grad=False)
 
@@ -323,9 +321,9 @@ class LeggedRobotNav(LeggedRobot):
     def _smooth_nav_actions(self, nav_actions):
         """ Smooth the nav actions over time
         """
-        # sample alpha from [0, 1], self.alpha is the smoothing factor, shape: (num_envs, 1)
+        # sample alpha from [0, 1], self.cmds_alpha is the smoothing factor, shape: (num_envs, 1)
         # in this way, we can reduce sudden changes in joints (alpha=0: no smoothing, but motors will respond immediately in reality)
-        self.nav_actions = self.alpha * nav_actions + (1 - self.alpha) * self.nav_actions
+        self.nav_actions = self.cmds_alpha * nav_actions + (1 - self.cmds_alpha) * self.nav_actions
         # self.nav_actions = nav_actions
         return self.nav_actions
 
@@ -396,7 +394,6 @@ class LeggedRobotNav(LeggedRobot):
         
         if len(env_ids) == 0:
             return
-        # self._update_terrain_curriculum(env_ids)
 
         # --- Replay Logic ---
         current_success_ratio = torch.mean(self.is_success_state.float())
@@ -459,25 +456,18 @@ class LeggedRobotNav(LeggedRobot):
         self.nav_refresh_interval[env_ids] = torch.randint(refresh_range[0], refresh_range[1] + 1, (len(env_ids),), device=self.device)
         
         # Resample smoothing factor alpha from [0.1, 0.5] step 0.05
-        alpha_values = torch.arange(0.1, 0.55, 0.05, device=self.device)
+        cmds_alpha_range = self.cfg.commands.cmds_alpha_range
+        cmds_alpha_step = self.cfg.commands.cmds_alpha_step
+        alpha_values = torch.arange(cmds_alpha_range[0], cmds_alpha_range[1], cmds_alpha_step, device=self.device)
         alpha_indices = torch.randint(0, len(alpha_values), (len(env_ids),), device=self.device)
-        self.alpha[env_ids] = alpha_values[alpha_indices].unsqueeze(1)
+        self.cmds_alpha[env_ids] = alpha_values[alpha_indices].unsqueeze(1)
         
         # Resample sigma points alpha
         sp_alpha_range = self.cfg.target.perception.alpha_range
         self.sigma_points_alpha[env_ids] = torch_rand_float(sp_alpha_range[0], sp_alpha_range[1], (len(env_ids), 1), device=self.device)
-
-        # Resample dummy sigma points offset (constant bias per episode)
-        # Randomly sample offset in [-0.15, 0.15]m for X, Y, Z
-        dummy_offset_scale = self.cfg.commands.dummy_sigma_offset
-        self.dummy_sigma_points_offset[env_ids] = torch_rand_float(-dummy_offset_scale, dummy_offset_scale, (len(env_ids), 3), device=self.device)
         
         if hasattr(self, 'filter_reset_mask'):
             self.filter_reset_mask[env_ids] = True
-
-        place_offset_scale = self.cfg.commands.place_offset_value
-        place_offset_error_margin = self.cfg.commands.place_offset_error_margin
-        self.place_offset[env_ids] = torch_rand_float(place_offset_scale - place_offset_error_margin, place_offset_scale + place_offset_error_margin, (len(env_ids), 1), device=self.device)
 
         # Resample latency steps
         if self.cfg.commands.enable_delay:
@@ -555,28 +545,6 @@ class LeggedRobotNav(LeggedRobot):
         self.gym.set_actor_root_state_tensor_indexed(self.sim,
                                                      gymtorch.unwrap_tensor(self.root_states),
                                                      gymtorch.unwrap_tensor(env_ids_int32), len(env_ids_int32))
-
-    def _roll_robots(self):
-        """ Random rolls the robots.
-        """
-        max_vel_roll = self.cfg.domain_rand.max_vel_roll
-        self.root_states[:, 10:11] = torch_rand_float(-max_vel_roll, max_vel_roll, (self.num_envs, 1), device=self.device) # ang vel x: simulate roll
-        self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(self.root_states))
-           
-    def _update_terrain_curriculum(self, env_ids):
-        """ Implements the game-inspired curriculum.
-
-        Args:
-            env_ids (List[int]): ids of environments being reset
-        """
-        if not self.init_done:
-            return
-        move_up = self.distance < 0.2
-        self.terrain_levels[env_ids] += 1 * move_up 
-        self.terrain_levels[env_ids] = torch.where(self.terrain_levels[env_ids]>=self.max_terrain_level,
-                                                   torch.randint_like(self.terrain_levels[env_ids], self.max_terrain_level),
-                                                   torch.clip(self.terrain_levels[env_ids], 0)) # (the minumum level is zero)
-        self.env_origins[env_ids] = self.terrain_origins[self.terrain_levels[env_ids], self.terrain_types[env_ids]]
     
     def reindex(self,tensor):
         """ sim2real purpose
@@ -723,19 +691,9 @@ class LeggedRobotNav(LeggedRobot):
         to_move = valid_time
         env_ids_resample = to_move.nonzero(as_tuple=False).flatten()
 
-        # initial_time = self.episode_length_buf <= 20
-        # to_resample_invalid = ((~self.is_valid) & initial_time)
-        # env_ids_resample_invalid = to_resample_invalid.nonzero(as_tuple=False).flatten()
-        # self._resample_commands(env_ids_resample_invalid)
-
         if len(env_ids_resample) > 0:
-            # Calculate success ratio
-            success_ratio = self.is_success_state.float().mean().item()
-            
             # Check config for active success feeding
             use_success_feeding = self.cfg.commands.resample.enable_success_feeding
-            # if success_ratio < 0.1:
-            #     use_success_feeding = True
         
             if use_success_feeding:
                 # Only feed a subset of environments to encourage exploration
@@ -754,7 +712,7 @@ class LeggedRobotNav(LeggedRobot):
             
             self.object_moved[env_ids_resample] = True
 
-    def _compute_optimal_grasp_pose(self):
+    def _compute_optimal_hint_pose(self):
         """
         Compute the optimal grasp pose and hint pose based on object shape.
         Delegates logic to GraspPoseOptimizer.
@@ -763,7 +721,7 @@ class LeggedRobotNav(LeggedRobot):
          self.optimal_grasp_quat, 
          self.optimal_approach_dir, 
          self.hint_pos, 
-         self.hint_quat) = self.grasp_optimizer.compute_optimal_grasp_pose(
+         self.hint_quat) = self.grasp_optimizer.compute_optimal_hint_pose(
             robot_base_pos=self.root_states[:, :3],
             gripper_pos=self.gripper_world,
             object_pos=self.object_pos,
@@ -824,8 +782,8 @@ class LeggedRobotNav(LeggedRobot):
         # get self.camera_transform_world('R': self.R_world_to_cam, 'T': self.camera_world), self.gripper_world
         self._compute_device_pose_in_world()
 
-        # # get optimal grasp pose
-        self._compute_optimal_grasp_pose() # Nontrivial
+        # get optimal grasp pose
+        self._compute_optimal_hint_pose() # Nontrivial
 
         # get self.sigma_points_3d, self.sigma_points_base, self.sigma_points_2d, self.is_valid for perception in obs
         self._get_nav_commands() # Nontrivial
@@ -1219,8 +1177,6 @@ class LeggedRobotNav(LeggedRobot):
     def compute_observations(self):
         """ Computes observations for updating nav agent with simulated latency and jitter
         """
-        # 1. Update ground-truth vision features (already done in post_physics_callback)
-        # self.nav_commands contains the current "perfect" perception
         
         # [Contrastive Learning] Update Task ID
         # 0: Pick Long, 1: Pick Short, 2: Place
@@ -1228,7 +1184,6 @@ class LeggedRobotNav(LeggedRobot):
         self.task_id[self.is_pick & (~self.obj_is_too_long)] = 1.0
         self.task_id[self.is_place] = 2.0
 
-        # 2. Get the "Ground Truth" observation for the CURRENT step
         obs_now = torch.cat([
             self.base_lin_vel_pred * self.obs_scales.lin_vel, # 3
             self.base_ang_vel * self.obs_scales.ang_vel, # 3
@@ -1238,13 +1193,13 @@ class LeggedRobotNav(LeggedRobot):
             self.nav_actions, # 4
             ], dim=-1)
 
-        # 3. Update the raw history buffer (Internal state, not seen by policy yet)
+        # raw_obs_buffer: obs without delay/jitter
         self.raw_obs_buffer = torch.cat([
             self.raw_obs_buffer[:, 1:], 
             obs_now.unsqueeze(1)
             ], dim=1)
 
-        # 4. Simulate Frame Refresh Jitter and Latency
+        # Simulate Frame Refresh Jitter and Latency
         if self.cfg.commands.enable_delay:
             # Frequency Jitter: Only "refresh" the sensor at randomized intervals
             refresh_mask = (self.episode_length_buf % self.nav_refresh_interval == 0)
@@ -1265,7 +1220,7 @@ class LeggedRobotNav(LeggedRobot):
                 self.current_perceived_obs.unsqueeze(1)
             ], dim=1)
         
-        # 8. priv + nav_cmd_hist + obs_hist
+        # return obs: priv + nav_cmd_hist + obs_hist
         self.obs_buf = torch.cat([
                                 # ------- privileged information start -------
                                 self.task_id, # dim 1

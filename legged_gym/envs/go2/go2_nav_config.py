@@ -106,6 +106,8 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
         # navigation refresh interval range [min_steps, max_steps]
         # e.g., [1, 2] means 50Hz to 25Hz if dt=20ms, [2, 2] means fixed 25Hz, [1, 3] means 50Hz to ~16.7Hz
         nav_refresh_steps_range = [1, 2] 
+        cmds_alpha_range = [0.1, 0.55] # alpha range for smoothing the commands, sampled from [0.1, 0.5] with step 0.05
+        cmds_alpha_step = 0.05
         # invalid commands
         enable_invalid_cmds = True
         enable_out_of_view_drift = True # if True, add random walk drift when out of view
@@ -119,7 +121,6 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
         max_drift_range = [0.05, 0.1]
         drift_curriculum_threshold = 0.1 # success ratio reference for max difficulty (as per instruction)
         
-        dummy_sigma_offset = 0.05 # [m] maximum offset for dummy sigma points when perception is invalid
         # max_out_of_view_duration = 2.0 # [s] the duration to keep the out of view coordinates
 
         enable_place_offset = False # If True, apply z-offset when placing, farther away from the object

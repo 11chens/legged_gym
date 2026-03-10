@@ -20,7 +20,7 @@ class GraspPoseOptimizer:
         self.place_clearance = cfg.target.shape.place_clearance
         # self.grasp_offset_place = cfg.env.grasp_offset_place # If it exists
 
-    def compute_optimal_grasp_pose(self, 
+    def compute_optimal_hint_pose(self, 
                                    robot_base_pos,
                                    gripper_pos,
                                    object_pos,
