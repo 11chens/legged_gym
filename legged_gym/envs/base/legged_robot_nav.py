@@ -245,8 +245,6 @@ class LeggedRobotNav(LeggedRobot):
 
         self.nav_actions_buffer = torch.zeros(self.num_envs, self.cfg.env.history_len, self.cfg.env.num_nav_actions, dtype=torch.float, device=self.device, requires_grad=False)
         self.nav_commands_buffer = torch.zeros(self.num_envs, self.cfg.env.nav_history_len, self.cfg.commands.num_nav_commands, dtype=torch.float, device=self.device, requires_grad=False)
-        self.delay_nav_commands_hist_buffer = torch.zeros(self.num_envs, self.cfg.env.nav_history_len, self.cfg.commands.num_nav_commands, dtype=torch.float, device=self.device, requires_grad=False)
-        self.delay_nav_commands = torch.zeros(self.num_envs, self.cfg.commands.num_nav_commands, dtype=torch.float, device=self.device, requires_grad=False)
         self.nav_clip_min = torch.tensor([self.cfg.commands.ranges.limit_vx[0], self.cfg.commands.ranges.limit_vy[0], self.cfg.commands.ranges.limit_vyaw[0], self.cfg.commands.ranges.limit_pitch[0]], dtype=torch.float, device=self.device, requires_grad=False)
         self.nav_clip_max = torch.tensor([self.cfg.commands.ranges.limit_vx[1], self.cfg.commands.ranges.limit_vy[1], self.cfg.commands.ranges.limit_vyaw[1], self.cfg.commands.ranges.limit_pitch[1]], dtype=torch.float, device=self.device, requires_grad=False)
         self.obs_hist_buffer = torch.zeros(self.num_envs, self.cfg.env.history_len, self.cfg.env.num_props, dtype=torch.float, device=self.device, requires_grad=False)
@@ -496,7 +494,6 @@ class LeggedRobotNav(LeggedRobot):
         self.obs_hist_buffer[env_ids, :, :] = 0.
         self.raw_obs_buffer[env_ids, :, :] = 0.
         self.current_perceived_obs[env_ids, :] = 0.
-        self.delay_nav_commands_hist_buffer[env_ids, :, :] = 0.
 
         # fill extras
         self.extras["episode"] = {}
@@ -1218,31 +1215,6 @@ class LeggedRobotNav(LeggedRobot):
         noise_vec[start:end] = 0. # self.nav_actions (get from rl policy, no noise)
 
         return noise_vec
-
-    def _resample_delay_nav_commands(self):
-        """ Resample delayed navigation commands with frequency and latency randomization
-        """
-        if self.cfg.commands.enable_delay:
-            # 1. Update frequency randomization (e.g., 25Hz - 50Hz)
-            # refresh_interval = 1: 50Hz, refresh_interval = 2: 25Hz
-            # self.nav_refresh_interval is randomized at reset
-            env_ids = (self.episode_length_buf % self.nav_refresh_interval == 0).nonzero(as_tuple=False).flatten()
-            
-            if len(env_ids) != 0:
-                # 2. Latency randomization (min_delay_time_ms to max_delay_time_ms)
-                # Option A: Use per-episode fixed potential latency (Simulate constant pipeline delay)
-                # This is more easier for the agent to learn than per-step chaotic jitter.
-                resample_time_idx = -self.nav_latency_steps[env_ids] - 1
-                
-                # Option B: Use per-step random latency (more robust training) - DISABLED due to training instability
-                # max_lat_step = int(self.cfg.commands.max_delay_time_ms // (self.dt * 1000))
-                # min_lat_step = int(self.cfg.commands.min_delay_time_ms // (self.dt * 1000))
-                # lat_jitter = torch.randint(min_lat_step, max_lat_step + 1, (len(env_ids),), device=self.device)
-                # resample_time_idx = -lat_jitter - 1
-                
-                self.delay_nav_commands[env_ids] = self.nav_commands_buffer[env_ids, resample_time_idx, :]
-        else:
-            self.delay_nav_commands = self.nav_commands.clone()
 
     def compute_observations(self):
         """ Computes observations for updating nav agent with simulated latency and jitter
