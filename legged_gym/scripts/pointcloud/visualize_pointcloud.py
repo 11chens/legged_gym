@@ -65,6 +65,7 @@ if __name__ == "__main__":
     parser.add_argument("path", type=str, nargs="?", help="Path to the .pt file. If omitted, picks randomly from obj_set.")
     parser.add_argument("--obj_root", type=str, default="/home/robot/project/legged_gym/obj_set", help="Root search path if no file specified.")
     args = parser.parse_args()
+    print("Before running, Please set env var:\nexport LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6")
     
     pt_path = args.path
     if pt_path is None:

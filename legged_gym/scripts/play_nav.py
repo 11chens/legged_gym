@@ -112,14 +112,14 @@ def play(args):
     env_cfg.commands.resample.ranges.min_dist = 2.0
     env_cfg.commands.resample.ranges.max_dist = 3.0
 
-    env_cfg.target.init.place_prob = 0.0
+    env_cfg.target.init.place_prob = 0.0 # 0 is pick only, 1 is place only, in between is a mix
     env_cfg.target.init.vertical_prob = 0.0
     env_cfg.target.perception.add_pre_pca_noise = True
     env_cfg.target.perception.alpha_range = [1.0, 1.0] # Sigma points scaling factor range
-    env_cfg.target.shape.types = ["sphere"]
+    # env_cfg.target.shape.types = ["sphere"]
     # env_cfg.target.shape.types = ["ycb"]
-    # env_cfg.target.shape.types = ["box"]
-    # env_cfg.target.shape.types = ["cuboid"]
+    # env_cfg.target.shape.types = ["box"] # place prob is 1
+    env_cfg.target.shape.types = ["cuboid"]
     # env_cfg.target.shape.dims_range = [[0.05, 0.10], [0.05, 0.10], [0.05, 0.10]] # longer pick cuboid
     # env_cfg.target.shape.dims_range = [[0.05, 0.08], [0.05, 0.08], [0.05, 0.08]] # little pick cuboid
     # env_cfg.target.shape.dims_range = [[0.04, 0.06], [0.04, 0.06], [0.04, 0.06]] # little box
@@ -280,7 +280,7 @@ def play(args):
         episode += dones.sum().item()
         
         # Stop condition: Record for specific episodes
-        if episode == 1:
+        if episode == 10:
             print("Completed 10 episodes. Saving data...")
             if args.npz:
                 log_path = os.path.expanduser("logs/sim_nav_log.npz")
