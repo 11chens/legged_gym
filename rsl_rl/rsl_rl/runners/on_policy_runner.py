@@ -120,6 +120,8 @@ class OnPolicyRunner:
             # Rollout
             with torch.inference_mode():
                 success_rates = []
+                dynamic_replay_probs = []
+                dynamic_feeding_probs = []
                 for i in range(self.num_steps_per_env):
                     actions = self.alg.act(obs, critic_obs)
                     
@@ -157,6 +159,10 @@ class OnPolicyRunner:
                             ep_infos.append(infos['episode'])
                         if 'success' in infos:
                             success_rates.append(infos['success'].item())
+                        if 'dynamic_replay_prob' in infos:
+                            dynamic_replay_probs.append(infos['dynamic_replay_prob'])
+                        if 'dynamic_feeding_prob' in infos:
+                            dynamic_feeding_probs.append(infos['dynamic_feeding_prob'])
                         cur_reward_sum += rewards
                         cur_episode_length += 1
                         new_ids = (dones > 0).nonzero(as_tuple=False)
@@ -223,6 +229,10 @@ class OnPolicyRunner:
 
         if 'success_rates' in locs and len(locs['success_rates']) > 0:
             self.writer.add_scalar('Train/mean_success', statistics.mean(locs['success_rates']), locs['it'])
+        if 'dynamic_replay_probs' in locs and len(locs['dynamic_replay_probs']) > 0:
+            self.writer.add_scalar('Train/dynamic_replay_prob', statistics.mean(locs['dynamic_replay_probs']), locs['it'])
+        if 'dynamic_feeding_probs' in locs and len(locs['dynamic_feeding_probs']) > 0:
+            self.writer.add_scalar('Train/dynamic_feeding_prob', statistics.mean(locs['dynamic_feeding_probs']), locs['it'])
 
         str = f" \033[1m Learning iteration {locs['it']}/{self.current_learning_iteration + locs['num_learning_iterations']} \033[0m "
 
@@ -255,6 +265,10 @@ class OnPolicyRunner:
 
         if 'success_rates' in locs and len(locs['success_rates']) > 0:
             log_string += f"""{'Mean success:':>{pad}} {statistics.mean(locs['success_rates']):.4f}\n"""
+        if 'dynamic_replay_probs' in locs and len(locs['dynamic_replay_probs']) > 0:
+            log_string += f"""{'Avg dynamic replay prob:':>{pad}} {statistics.mean(locs['dynamic_replay_probs']):.4f}\n"""
+        if 'dynamic_feeding_probs' in locs and len(locs['dynamic_feeding_probs']) > 0:
+            log_string += f"""{'Avg dynamic feeding prob:':>{pad}} {statistics.mean(locs['dynamic_feeding_probs']):.4f}\n"""
 
         log_string += ep_string
         log_string += (f"""{'-' * width}\n"""

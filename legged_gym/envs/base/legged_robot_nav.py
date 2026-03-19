@@ -268,6 +268,9 @@ class LeggedRobotNav(LeggedRobot):
         # refresh_interval 1 = 50Hz, 2 = 25Hz (since dt=20ms)
         self.nav_refresh_interval = torch.ones(self.num_envs, device=self.device, dtype=torch.int64)
         self.nav_latency_steps = torch.zeros(self.num_envs, device=self.device, dtype=torch.int64)
+
+        self.dynamic_replay_prob = 0.0
+        self.dynamic_feeding_prob = 0.0
         
         self._load_loco_policy()
 
@@ -416,9 +419,12 @@ class LeggedRobotNav(LeggedRobot):
         # 1. success_ratio > threshold
         # 2. was failure in last episode
         # 3. random chance
-        should_replay = (current_success_ratio >= replay_cfg.replay_min_success_ratio) & \
-                        (self.is_failure_state[env_ids]) & \
-                        (torch.rand(len(env_ids), device=self.device) < replay_cfg.replay_failed_prob)
+        threshold = getattr(replay_cfg, 'curriculum_threshold', 0.1)
+        r_min, r_max = getattr(replay_cfg, 'replay_failed_prob_range', [0.2, 0.8])
+        progress = torch.clamp(current_success_ratio / threshold, 0.0, 1.0)
+        self.dynamic_replay_prob = r_max - (r_max - r_min) * torch.exp(-5.0 * progress).item()
+        should_replay = (self.is_failure_state[env_ids]) & \
+                        (torch.rand(len(env_ids), device=self.device) < self.dynamic_replay_prob)
 
         replay_env_ids = env_ids[should_replay]
         new_env_ids = env_ids[~should_replay]
@@ -496,6 +502,13 @@ class LeggedRobotNav(LeggedRobot):
 
         # Log success ratio
         self.extras["success"] = self.is_success_state.float().mean()
+
+        # Log Dynamic Replay Probability
+        self.extras["dynamic_replay_prob"] = self.dynamic_replay_prob
+
+        # Log Dynamic Feeding Probability
+        self.extras["dynamic_feeding_prob"] = self.dynamic_feeding_prob
+
 
     def _save_scenario_state(self, env_ids):
         """ Save the current scenario state for potential future replay """
@@ -697,8 +710,16 @@ class LeggedRobotNav(LeggedRobot):
         
             if use_success_feeding:
                 # Only feed a subset of environments to encourage exploration
-                # Probability of feeding: 30%
-                should_feed = torch.rand(len(env_ids_resample), device=self.device) < self.cfg.commands.resample.feeding_prob
+                # Probability of feeding: decreases as success ratio increases
+                current_success_ratio = torch.mean(self.is_success_state.float())
+                
+                resample_cfg = self.cfg.commands.resample
+                threshold = getattr(resample_cfg, 'curriculum_threshold', 0.1)
+                f_min, f_max = getattr(resample_cfg, 'feeding_prob_range', [0.2, 0.5])
+                progress = torch.clamp(current_success_ratio / threshold, 0.0, 1.0)
+                self.dynamic_feeding_prob = f_min + (f_max - f_min) * torch.exp(-5.0 * progress).item()
+                
+                should_feed = torch.rand(len(env_ids_resample), device=self.device) < self.dynamic_feeding_prob
                 # invalid env ids
                 # should_feed = should_feed | (~self.is_valid[env_ids_resample])
                 ids_to_feed = env_ids_resample[should_feed]
@@ -1370,8 +1391,8 @@ class LeggedRobotNav(LeggedRobot):
         r_rot = (~self.near_target).float() * torch.exp(-self.rot_error_sq_far / self.cfg.rewards.rot_track_sigma) + \
                 1 * (self.near_target).float() * torch.exp(-self.rot_error_sq_near / self.cfg.rewards.rot_track_sigma)  # sigma ~ 0.14 rad
         
-        r_pos_short_pick = torch.exp(-self.pos_error_sq / self.cfg.rewards.pos_track_sigma) # sigma ~ 0.14 m
-        r_pos_long_pick = torch.exp(-self.pos_error_sq / self.cfg.rewards.pos_track_sigma) # sigma ~ 0.14 m
+        r_pos_short_pick = torch.exp(-self.pos_error_sq / self.cfg.rewards.soft_sigma) # sigma ~ 0.14 m
+        r_pos_long_pick = torch.exp(-self.pos_error_sq / self.cfg.rewards.soft_sigma) # sigma ~ 0.14 m
         r_pos_place = torch.exp(-self.pos_error_sq_place / self.cfg.rewards.soft_sigma) # sigma ~ 0.14 m
 
         # 3. Goal Reaching Reward (Pulls along line to Optimal)

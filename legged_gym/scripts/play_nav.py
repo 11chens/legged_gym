@@ -70,7 +70,7 @@ def play(args):
     env: LeggedRobotNav
     env_cfg: Go2NavFlatCfg
 
-    args.load_run = '02_14_13-17-58_'
+    args.load_run = '03_16_20-15-42_'
     # args.checkpoint = 4000
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     # override some parameters for testing
@@ -98,7 +98,7 @@ def play(args):
     env_cfg.commands.hold_time_s = 1.0 # 1 second hold time to consider as success
 
     env_cfg.domain_rand.randomize_friction = True
-    env_cfg.domain_rand.friction_range = [0.2, 0.6]
+    env_cfg.domain_rand.friction_range = [5.0, 10.0]
 
     env_cfg.domain_rand.randomize_restitution = False
     env_cfg.domain_rand.randomize_base_mass = False
@@ -127,6 +127,7 @@ def play(args):
     # env_cfg.target.shape.box_dims_range = [[0.03, 0.05], [0.03, 0.05], [0.03, 0.05]] # little place box
     # env_cfg.target.shape.box_dims_range = [[0.03, 0.05], [0.03, 0.05], [0.2, 0.35]] # thin bucket
     # env_cfg.target.shape.box_dims_range = [[0.25, 0.25], [0.35, 0.35], [0.15, 0.16]] # big box
+    # env_cfg.target.shape.dims_range = [[0.04, 0.06], [0.15, 0.15], [0.04, 0.06]] # [[], [0.15, 0.2], []]
 
     # prepare environment
     env, _ = task_registry.make_env(name=args.task, args=args, env_cfg=env_cfg)
@@ -193,8 +194,6 @@ def play(args):
         video_writer = cv2.VideoWriter(video_filename, fourcc, 50.0, (camera_props.width, camera_props.height))
 
     for i in range(20 * int(env.max_episode_length)):
-        env.alpha *= 0.0 
-        env.alpha += 0.2
         object_pos = env.object_pos[0]
 
         if args.onnx:

@@ -65,7 +65,7 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
         debug_viz = False
 
         # Optimal Grasp Pose Parameters
-        grasp_offset_long = -0.0 # [m] Distance from long-axis vertex (Head/Tail)
+        grasp_offset_long = -0.07 # [m] Distance from long-axis vertex (Head/Tail)
         grasp_offset_short = -0.05 # [m] Distance from object surface (Short axis)
         grasp_offset_place = -0.1 # [m] Distance from object surface (Short axis)
         
@@ -142,15 +142,19 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
             adjust_obj_pose = True
             force_look_upwards = True
             enable_success_feeding = True # If True, use success  feeding mechanism
-            feeding_prob = 0.33 # Probability of feeding when using success feeding
             force_lookup_prob = 0.2 # Probability of forcing a look-up when adjusting object pose
             min_steps = 100 # Minimum steps before resampling on the way
             look_up_duration = 0.5 # [s] Duration to maintain look-up pitch
             resample_interval_steps = 150 # Resample every N steps
-            
+            # Feeding object near target
+            feeding_prob = 0.33 # Probability of feeding when using success feeding
             # Replay failed scenarios
             replay_failed_prob = 0.7 # Probability of replaying a failed scenario
-            replay_min_success_ratio = 0.0 # Minimum success ratio to start replaying
+            
+            # Adaptive Curriculum Parameters
+            curriculum_threshold = 0.1 # Success ratio max reference
+            feeding_prob_range = [0.2, 0.5] # [min, max] probability
+            replay_failed_prob_range = [0.2, 0.8] # [min, max] probability
 
             class ranges:
                 # dist_fwd = [0.1, 0.5] # min max [m]
@@ -160,7 +164,7 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
                 max_dist = 1.5  # maximum time to reach the target [s]
 
     class gripper:
-        gripper_offset = [0.40, 0.0, -0.06] # [m] offset from base link to gripper center in base frame
+        gripper_offset = [0.41, 0.0, -0.07] # [m] offset from base link to gripper center in base frame
         gripper_width = 0.12 # [m]
     
     class camera_sensor:
@@ -202,7 +206,7 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
         class extrinsics: # Extrinsics parameters
             #  ================= fixed extrinsics =================
             translation = [0.305, 0.017, 0.128]  # Translation: forward, left, upward
-            angles = [0.0, 35.0, 0.0]  # Euler angles: yaw, pitch, roll
+            angles = [0.0, 33.0, 0.0]  # Euler angles: yaw, pitch, roll
             
             #  ================= random extrinsics =================
             # Randomization ranges around the fixed extrinsics
@@ -245,7 +249,7 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
 
     class domain_rand( LeggedRobotNavCfg.domain_rand ):
         randomize_friction = True
-        friction_range = [0.2, 2.0]
+        friction_range = [0.2, 5.0]
         randomize_restitution = True
         restitution_range = [0.0, 1.0]
         randomize_base_mass = True

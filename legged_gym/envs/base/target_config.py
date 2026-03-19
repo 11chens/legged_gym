@@ -17,7 +17,7 @@ class TargetCfg:
         # height_range = [0.05, 0.07]
         height_range = [0.15, 0.2]
         # height_range = [0.05, 0.08]
-        dims_range = [[0.03, 0.05], [0.15, 0.2], [0.03, 0.05]] # [[], [0.15, 0.2], []]
+        dims_range = [[0.04, 0.06], [0.15, 0.2], [0.04, 0.06]] # [[], [0.15, 0.2], []]
         
         # Ellipsoid dimensions (Short logic task)
         ellipsoid_dims_range = [[0.03, 0.10], [0.03, 0.10], [0.03, 0.10]] # [min, max] for x, y, z (diameters)
@@ -53,7 +53,7 @@ class TargetCfg:
         # Randomization ranges
         pos_x_range = [1.0, 3.0] # Distance from robot
         pos_y_range = [-1.0, 1.0]
-        place_prob = 0.4  # Probability of Place task
+        place_prob = 0.3  # Probability of Place task
         vertical_prob = 0.01  # Probability of vertical placement, we encourage horizontal placement, to help robot learn short-end grasping.
         
         # Orientation randomization
