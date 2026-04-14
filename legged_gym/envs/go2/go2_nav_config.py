@@ -159,7 +159,7 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
             class ranges:
                 # dist_fwd = [0.1, 0.5] # min max [m]
                 dist_fwd = [0.0, 0.3] # min max [m]
-                dist_lat = [-0.1, 0.1] # min max [m]
+                dist_lat = [-0.2, 0.2] # min max [m]
                 min_dist = 0.5  # minimum time to reach the target [s]
                 max_dist = 1.5  # maximum time to reach the target [s]
 
@@ -324,7 +324,7 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
             missing_sigma_points = -0.1
             successful_grasp = 20.0
             backup = -4
-            sequential_reaching = 0.4
+            sequential_reaching = 0.3
 
         soft_dof_pos_limit = 0.95
         base_height_target = 0.25
@@ -338,9 +338,12 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
         tracking_sigma = 0.1
         weight_track_pick_pos = 3.0
         weight_track_place_pos = 5.0
-        rot_track_sigma = 0.02
+        rot_track_sigma = 0.04
         pos_track_sigma = 0.02
+        vel_track_sigma = 0.04
         soft_sigma = 0.04
+        stand_still_lin_sigma = 0.04
+        stand_still_ang_sigma = 0.08
 
 class Go2NavFlatCfgPPO( LeggedRobotCfgPPO ):
     runner_class_name = 'OnPolicyRunner'

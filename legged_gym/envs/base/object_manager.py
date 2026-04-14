@@ -605,7 +605,7 @@ class ObjectManager:
         # Orientation: Align Long Axis with Path Dir
         # 1. Base rotation: Align Global X with Path Dir
         # Add random yaw perturbation
-        yaw_noise = torch_rand_float(-10.0, 10.0, (n_long, 1), device=self.device).squeeze(-1)
+        yaw_noise = torch_rand_float(-20.0, 20.0, (n_long, 1), device=self.device).squeeze(-1)
         yaw_long = yaw[mask] + yaw_noise
         sy = torch.sin(yaw_long * 0.5)
         cy = torch.cos(yaw_long * 0.5)

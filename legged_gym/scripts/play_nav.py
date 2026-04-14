@@ -70,8 +70,8 @@ def play(args):
     env: LeggedRobotNav
     env_cfg: Go2NavFlatCfg
 
-    args.load_run = '03_16_20-15-42_'
-    # args.checkpoint = 4000
+    args.load_run = '04_13_18-39-16_'
+    # args.checkpoint = 10000
     env_cfg, train_cfg = task_registry.get_cfgs(name=args.task)
     # override some parameters for testing
     env_cfg.env.num_envs = 1
@@ -116,10 +116,10 @@ def play(args):
     env_cfg.target.init.vertical_prob = 0.0
     env_cfg.target.perception.add_pre_pca_noise = True
     env_cfg.target.perception.alpha_range = [1.0, 1.0] # Sigma points scaling factor range
-    # env_cfg.target.shape.types = ["sphere"]
+    env_cfg.target.shape.types = ["sphere"]
     # env_cfg.target.shape.types = ["ycb"]
     # env_cfg.target.shape.types = ["box"] # place prob is 1
-    env_cfg.target.shape.types = ["cuboid"]
+    # env_cfg.target.shape.types = ["cuboid"]
     # env_cfg.target.shape.dims_range = [[0.05, 0.10], [0.05, 0.10], [0.05, 0.10]] # longer pick cuboid
     # env_cfg.target.shape.dims_range = [[0.05, 0.08], [0.05, 0.08], [0.05, 0.08]] # little pick cuboid
     # env_cfg.target.shape.dims_range = [[0.04, 0.06], [0.04, 0.06], [0.04, 0.06]] # little box

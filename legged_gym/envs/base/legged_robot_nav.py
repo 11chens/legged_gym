@@ -659,7 +659,7 @@ class LeggedRobotNav(LeggedRobot):
 
         # 2. Orientation Alignment
         # is_aligned = self.yaw_err < 0.1 # ~5.7 degrees tolerance
-        is_at_target = self.is_pick * torch.logical_and(self.d_goal_err_x < 0.05, self.d_goal_err_y < 0.03) + \
+        is_at_target = self.is_pick * torch.logical_and(self.d_goal_err_x < 0.03, self.d_goal_err_y < 0.03) + \
                          self.is_place * torch.logical_and(self.d_goal_err_x < 0.05, self.d_goal_err_y < 0.05)
         
         is_aligned = self.is_pick * (self.yaw_err < 0.1) + \
@@ -1329,17 +1329,19 @@ class LeggedRobotNav(LeggedRobot):
 
         lin_vel_sq = torch.sum(torch.square(self.base_lin_vel), dim=1)
         ang_vel_sq = torch.sum(torch.square(self.base_ang_vel), dim=1)
+        r_vel = torch.exp(-(lin_vel_sq + ang_vel_sq) / self.cfg.rewards.vel_track_sigma) # sigma ~ 0.2 m/s
         _stand_still = torch.logical_and(self.base_lin_vel[:, 0] < 0.1, self.base_lin_vel[:, 0] > 0.0)  # robot should slow down when approaching the target
+        _stand_still = torch.logical_and(_stand_still, self.base_ang_vel[:, 2].abs() < 0.1)  # reduce angular velocity
+        # _rew_stand_still = torch.exp(-lin_vel_sq / (2 * self.cfg.rewards.stand_still_lin_sigma**2)) + torch.exp(-ang_vel_sq / (2 * self.cfg.rewards.stand_still_ang_sigma**2))
         # _slow_approach = torch.logical_and(self.base_lin_vel[:, 0] < 0.2, self.base_lin_vel[:, 0] > 0.0)  # robot should slow down when approaching the target
         _no_rotation = self.base_ang_vel[:, 2].abs() < 0.1  # reduce angular velocity
-        r_vel = torch.exp(-(lin_vel_sq + ang_vel_sq) / self.cfg.rewards.pos_track_sigma) # sigma ~ 0.2 m/s
-
-        _rew_short_pick = self.is_pick * (~self.obj_is_too_long) * r_rot * (1.0 + 1.0 * self.cfg.rewards.weight_track_pick_pos * r_pos_short_pick)
-        _rew_long_pick = self.is_pick * (self.obj_is_too_long) * r_rot * (1.0 + self.cfg.rewards.weight_track_pick_pos * r_pos_long_pick)
-        _rew_pick = _rew_short_pick * _stand_still + _rew_long_pick
-        _rew_place = self.is_place * r_rot * (1.0 + self.cfg.rewards.weight_track_place_pos * r_pos_place) * _no_rotation
-
+        _rew_short_pick = self.is_pick * (~self.obj_is_too_long) * (r_rot) * (1.0 + 3.0 * self.cfg.rewards.weight_track_pick_pos * r_pos_short_pick)
+        _rew_long_pick = self.is_pick * (self.obj_is_too_long) * (r_rot) * (1.0 + 1.0 * self.cfg.rewards.weight_track_pick_pos * r_pos_long_pick)
+        _rew_pick = _rew_short_pick * (1.0 + _stand_still) + _rew_long_pick
+        _rew_place = self.is_place * (1.0 + r_rot) * (1.0 + self.cfg.rewards.weight_track_place_pos * r_pos_place) * _no_rotation
+        # print(f"lin vel: {torch.sqrt(lin_vel_sq)[0]:.3f}, ang_vel:({self.base_ang_vel[0, 0]:.3f}, {self.base_ang_vel[0, 1]:.3f}, {self.base_ang_vel[0, 2]:.3f}), _rew_stand_still: {_rew_stand_still[0]:.3f}")
         return self.is_success_state.float() * (_rew_pick + _rew_place) * r_vel
+        # return self.is_success_state.float() * (_rew_pick + _rew_place) * _rew_stand_still
 
     def _reward_backup(self):
         """ Reward for backing up when too close to the object
@@ -1391,20 +1393,14 @@ class LeggedRobotNav(LeggedRobot):
         r_rot = (~self.near_target).float() * torch.exp(-self.rot_error_sq_far / self.cfg.rewards.rot_track_sigma) + \
                 1 * (self.near_target).float() * torch.exp(-self.rot_error_sq_near / self.cfg.rewards.rot_track_sigma)  # sigma ~ 0.14 rad
         
-        r_pos_short_pick = torch.exp(-self.pos_error_sq / self.cfg.rewards.soft_sigma) # sigma ~ 0.14 m
-        r_pos_long_pick = torch.exp(-self.pos_error_sq / self.cfg.rewards.soft_sigma) # sigma ~ 0.14 m
+        r_pos_short_pick = torch.exp(-self.pos_error_sq / self.cfg.rewards.pos_track_sigma) # sigma ~ 0.14 m
+        r_pos_long_pick = torch.exp(-self.pos_error_sq / self.cfg.rewards.pos_track_sigma) # sigma ~ 0.14 m
         r_pos_place = torch.exp(-self.pos_error_sq_place / self.cfg.rewards.soft_sigma) # sigma ~ 0.14 m
-
+        
         # 3. Goal Reaching Reward (Pulls along line to Optimal)
-        _rew_short_pick = self.is_pick * (~self.obj_is_too_long) * r_path * r_rot * (1.0 + self.cfg.rewards.weight_track_pick_pos * r_pos_short_pick)
-        _rew_long_pick = self.is_pick * (self.obj_is_too_long) * r_path * r_rot * (1.0 + self.cfg.rewards.weight_track_pick_pos * r_pos_long_pick)
+        _rew_short_pick = self.is_pick * (~self.obj_is_too_long) * (1 + 1.0 * r_path) * (r_rot) * (1.0 + 1.0 * self.cfg.rewards.weight_track_pick_pos * r_pos_short_pick)
+        _rew_long_pick = self.is_pick * (self.obj_is_too_long) * (1 + 2.0 * r_path) * (r_rot) * (1.0 + 1.0 * self.cfg.rewards.weight_track_pick_pos * r_pos_long_pick)
         _rew_pick = _rew_short_pick * _slow_approach + _rew_long_pick
-        _rew_place = self.is_place * r_path * r_rot * (1.0 + self.cfg.rewards.weight_track_place_pos * r_pos_place) * _no_rotation
+        _rew_place = self.is_place * r_path * (1.0 + r_rot) * (1.0 + self.cfg.rewards.weight_track_place_pos * r_pos_place) * _no_rotation
         
         return (_rew_pick + _rew_place)
-
-    def _reward_invalid_stand_still(self):
-        """ Reward for standing still when all sigma points are invalid
-        """
-        pos_error_sq = torch.square(self.d_goal_err_x) + torch.square(self.d_goal_err_y)
-        return (~self.is_valid) * pos_error_sq * (self.timer.squeeze(dim=1) > 0.2).float()
