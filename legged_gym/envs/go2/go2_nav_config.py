@@ -43,7 +43,6 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
     class loco:
         use_loco_policy = True
         loco_body_model_file = 'controller/pitch/model_light.jit'
-        # loco_body_model_file = 'controller/pitch/model.jit'
         loco_obs_dim = 47
         loco_history_len = 5
 
@@ -336,7 +335,8 @@ class Go2NavFlatCfg( LeggedRobotNavCfg ):
         soft_torque_limit = 0.85
         max_contact_force = 100.
         tracking_sigma = 0.1
-        weight_track_pick_pos = 3.0
+        weight_track_pick_long_pos = 3.0
+        weight_track_pick_short_pos = 5.0
         weight_track_place_pos = 5.0
         rot_track_sigma = 0.04
         pos_track_sigma = 0.02
