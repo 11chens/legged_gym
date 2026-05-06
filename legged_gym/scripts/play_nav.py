@@ -188,6 +188,7 @@ def play(args):
     
     # Initialize main video writer if pre-defined dimensions are used
     if args.video:
+        os.makedirs("logs", exist_ok=True)
         video_filename = os.path.expanduser(f"logs/top_{env_cfg.target.shape.types[0]}.mp4")
         print(f"Recording video to {video_filename}")
         fourcc = cv2.VideoWriter_fourcc(*'mp4v') # Match preference

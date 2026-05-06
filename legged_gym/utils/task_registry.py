@@ -142,6 +142,9 @@ class TaskRegistry():
             log_dir = None
         else:
             log_dir = os.path.join(log_root, datetime.now().strftime('%m_%d_%H-%M-%S') + '_' + train_cfg.runner.run_name)
+            
+        if log_dir is not None:
+            os.makedirs(log_dir, exist_ok=True)
         
         train_cfg_dict = class_to_dict(train_cfg)
         runner = OnPolicyRunner(env, train_cfg_dict, log_dir, device=args.rl_device)
