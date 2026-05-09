@@ -39,10 +39,9 @@ EPISODE_LENGTH_S = 6
 class Go2NavFlatCfg( LeggedRobotNavCfg ):
     target = TargetCfg
     debug_viz = True
-    pixel_gain = 10.0
     class loco:
         use_loco_policy = True
-        loco_body_model_file = 'controller/pitch/model_light.jit'
+        loco_body_model_file = 'controller/model_light.jit'
         loco_obs_dim = 47
         loco_history_len = 5
 
